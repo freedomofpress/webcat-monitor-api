@@ -2,8 +2,8 @@
 -- Usage: clickhouse-client --param_file=rekor-v1/export/v1/part-000000000000.parquet --multiquery < load_v1.sql
 -- v1_ingest.sh points the INSERT at a staging table and attaches its parts afterwards, so a failed file leaves no rows behind.
 -- identity: one row per SAN URI and email (the extension accepts a claim matching any SAN); when the loader left the
--- SAN columns empty (most Fulcio certs before ~index 50M) the first GeneralName of the raw SAN, URI, email or
--- otherName; else one row per PGP user id; else the key digest.
+-- SAN columns empty (most Fulcio certs before ~index 50M) the first GeneralName of the raw SAN if it is a URI or
+-- email; else one row per PGP user id; else the key digest.
 -- issuer: Fulcio OIDC issuer (1.8, else 1.1), else the certificate issuer DN, else the Go key type.
 -- ext: every OID except the two issuer OIDs (moved to issuer), git SHAs 1.3/1.10/1.13/1.19, run ids 1.15/1.17,
 -- run invocation URI 1.21 and the raw SAN. Those are per-entry noise for an index.
@@ -19,18 +19,6 @@ CREATE OR REPLACE FUNCTION derText AS (v) ->  -- Fulcio OIDs >= 1.8 are DER UTF8
   if(substring(v, 1, 1) = '\x0C', substring(v, 2 + derLen(v, 2).2), v);
 
 INSERT INTO webcat.entries
-WITH  -- first GeneralName of the raw SAN, for rows where the loader's SAN columns are empty. 1-based offsets, derLen = (length, header bytes).
-  2 + derLen(rawsan, 2).2 AS p1,                                   -- tag of the first GeneralName
-  substring(rawsan, p1, 1) AS tag,
-  derLen(rawsan, p1 + 1) AS l1,
-  substring(rawsan, p1 + 1 + l1.2, l1.1) AS simpleText,            -- URI [6] or email [1]: the value itself
-  p1 + 1 + l1.2 AS pOid,                                           -- otherName [0] { OID, [0] { UTF8String } }
-  reinterpretAsUInt8(substring(rawsan, pOid + 1, 1)) AS lOid,
-  pOid + 2 + lOid AS pExp,
-  pExp + 1 + derLen(rawsan, pExp + 1).2 AS pTxt,
-  derLen(rawsan, pTxt + 1) AS lTxt,
-  substring(rawsan, pTxt + 1 + lTxt.2, lTxt.1) AS otherText,
-  multiIf(substring(rawsan, 1, 1) != '\x30', '', tag IN ('\x86', '\x81'), simpleText, tag = '\xa0', otherText, '') AS sanFirst
 SELECT
   'rekor-v1' AS log,
   toUInt64(LogIndex) AS log_index,
@@ -43,7 +31,10 @@ SELECT
     ifNull(IdentityGoType, '')) AS issuer,
   arrayJoin(multiIf(
     length(arrayConcat(SANExtensionURIs, SANExtensionEmailAddresses)) > 0, arrayConcat(SANExtensionURIs, SANExtensionEmailAddresses),
-    rawsan != '', [sanFirst],
+    -- raw SAN fallback: the first GeneralName when it is a URI [6] or email [1]. Measured on the early log: 6 otherName-first
+    -- SANs in 510k; the otherName chain cost 1.5 GB per file in SQL, so v1 skips it (v2 handles otherName in Python).
+    rawsan != '' AND substring(rawsan, 2 + derLen(rawsan, 2).2, 1) IN ('\x86', '\x81'),
+      [substring(rawsan, 3 + derLen(rawsan, 2).2 + derLen(rawsan, 3 + derLen(rawsan, 2).2).2, derLen(rawsan, 3 + derLen(rawsan, 2).2).1)],
     length(PGPIdentities) > 0, PGPIdentities,
     length(Digests) > 0, [Digests[1]],
     [''])) AS identity,
