@@ -22,9 +22,8 @@ FROM \`bigquery-public-data.rekor.Identities\` i
 JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)"
   bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US \
      --destination_table="$DATASET.v1_artifacts" --replace --maximum_bytes_billed=100000000000 "
-SELECT a.EntryUUID, e.LogIndex, a.Digest, a.AttestationType, a.SubjectName
-FROM \`bigquery-public-data.rekor.Artifacts\` a
-JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)"
+SELECT EntryUUID, Digest, AttestationType, SubjectName
+FROM \`bigquery-public-data.rekor.Artifacts\`"   # LogIndex is attached locally via EntryUUID; the join would scan 0.3 TB
   ;;
 extract)
   gcloud storage buckets create "$BUCKET" --project="$PROJECT" --location=US --uniform-bucket-level-access 2>/dev/null || true
