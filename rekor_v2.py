@@ -91,8 +91,8 @@ def fetch(src, paths):
     # A crash between a chunk's inserts and its state write would duplicate that chunk on resume. The state carries a
     # dirty flag across that window; only then is the (expensive, full-table) cleanup delete run.
     if state.get("dirty"):
-        for t in ("entries", "claims", "sha"):
-            ch(f"DELETE FROM webcat.{t} WHERE log = '{name}' AND log_index >= {parsed * WIDTH}") if t != "claims" else None
+        for t in ("entries", "sha"):  # claims has no log_index and dedups on merge
+            ch(f"DELETE FROM webcat.{t} WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")
         state["dirty"] = False; state_file.write_text(json.dumps(state))
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
