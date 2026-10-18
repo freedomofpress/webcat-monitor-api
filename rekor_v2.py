@@ -89,7 +89,7 @@ def fetch(src, paths):
     parsed = state.get("parsed", 0)         # bundles whose rows are in ClickHouse
     have_roots = roots_file.stat().st_size // 32 if roots_file.exists() else 0
     # Rows from a chunk that was inserted but not recorded (crash in between) would be duplicated: clear them first.
-    ch(f"ALTER TABLE webcat.entries DELETE WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")
+    ch(f"DELETE FROM webcat.entries WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")  # lightweight: masks rows, no part rewrite
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
     def one(n):
