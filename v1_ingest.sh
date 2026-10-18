@@ -8,12 +8,16 @@ DONE=$DST/loaded.txt
 cd /opt/webcat-monitor
 step=${1:-all}
 
-if [ "$step" = download ] || [ "$step" = all ]; then
+if { [ "$step" = download ] || [ "$step" = all ]; } && [ ! -f "$DST/download.verified" ]; then
+  # Runs once. After verification the files are made read-only and this block never runs again,
+  # so a deleted bucket or a re-run can never touch the local copy (re-exporting costs ~75 USD).
   mkdir -p "$DST"
   gcloud storage rsync -r "$BUCKET/" "$DST/" 2>&1 | tail -2
   gcloud storage ls -l -r "$BUCKET/**" | grep parquet | awk '{print $1, $3}' | sed "s|$BUCKET/||" | sort > /tmp/remote.txt
   (cd "$DST" && find . -name '*.parquet' -printf '%s %P\n' | sed 's|^\([0-9]*\) \./|\1 |' | sort) > /tmp/local.txt
   diff /tmp/remote.txt /tmp/local.txt && echo "download verified: $(wc -l < /tmp/local.txt) objects"
+  chmod -R a-w "$DST/v1" "$DST/v1_artifacts"
+  date -u +%FT%TZ > "$DST/download.verified"
 fi
 
 if [ "$step" = load ] || [ "$step" = all ]; then

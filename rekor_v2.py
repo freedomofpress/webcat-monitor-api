@@ -107,7 +107,7 @@ def fetch(src, paths):
             entry = json.loads(e)
             rows += [record(n * WIDTH + k, now, kind, v) for kind, v in verifiers(entry)]
         hdst.parent.mkdir(parents=True, exist_ok=True)
-        if not hdst.exists(): hdst.write_bytes(hashes)
+        if not hdst.exists(): hdst.write_bytes(hashes); hdst.chmod(0o444)
         if keep and not bdst.exists():
             bdst.parent.mkdir(parents=True, exist_ok=True)
             tmp = bdst.with_suffix(".tmp"); tmp.write_bytes(zstandard.compress(bundle, ZSTD_LEVEL)); tmp.rename(bdst)
@@ -117,12 +117,20 @@ def fetch(src, paths):
     with ThreadPoolExecutor(WORKERS) as ex, roots_file.open("r+b" if roots_file.exists() else "wb") as rf:
         for start in range(parsed, full, CHUNK):
             end = min(start + CHUNK, full)
+            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"   # relative to ClickHouse user_files_path = the archive volume
+            apath = paths["archive"] / archive
+            # Invariant: a read-only archive file is complete and already loaded. It is never rewritten; a resume only
+            # re-projects it into the index. A writable one is a leftover from a crash mid-write and is replaced.
+            if apath.exists() and not (apath.stat().st_mode & 0o200) and have_roots >= end:
+                ch(LOAD_SQL, params={"log": name, "file": archive})
+                state.update({"origin": origin, "parsed": end}); state_file.write_text(json.dumps(state))
+                logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
             results = list(ex.map(one, range(start, end)))
             body = "\n".join(json.dumps(r) for _, rows in results for r in rows)
-            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"   # relative to ClickHouse user_files_path = the archive volume
             ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
                "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
             ch(LOAD_SQL, params={"log": name, "file": archive})
+            apath.chmod(0o444)
             if end > have_roots:
                 rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush()
                 have_roots = end

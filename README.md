@@ -15,3 +15,5 @@ The monitor and ClickHouse run as the `clickhouse` user, which owns `/srv/index`
 Deploy: `rsync -a --exclude .git ./ root@HOST:/opt/webcat-monitor/ && ssh root@HOST 'cp /opt/webcat-monitor/webcat-monitor.* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now webcat-monitor.timer'`
 
 Not verified yet: Sigsum tree head signatures and witness cosignatures, Rekor checkpoint signatures. Both need ed25519, which the stdlib lacks. The signed material is stored raw so it can be checked later.
+
+Archive protection: the v1 export is downloaded once, verified against the bucket listing, then made read-only and marked with `download.verified`; the download step never runs again. v2 archive chunks and hash tiles are written once and made read-only after the index load; a resume reuses a read-only chunk and only replaces a writable leftover from a crash. Nothing in the repo deletes anything under `/srv/archive` except raw v2 bundles after they are archived. As root, `chattr +i` on the export files adds a kernel-level guarantee.
