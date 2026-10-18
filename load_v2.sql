@@ -17,5 +17,5 @@ SELECT
   arrayJoin(if(length(arrayConcat(san_uris, san_emails, san_other)) > 0, arrayConcat(san_uris, san_emails, san_other), [key_digest])) AS identity,
   mapFilter((k, v) -> k NOT IN ('1.3.6.1.4.1.57264.1.1','1.3.6.1.4.1.57264.1.8','1.3.6.1.4.1.57264.1.3','1.3.6.1.4.1.57264.1.10',
                                 '1.3.6.1.4.1.57264.1.13','1.3.6.1.4.1.57264.1.19','1.3.6.1.4.1.57264.1.15','1.3.6.1.4.1.57264.1.17',
-                                '1.3.6.1.4.1.57264.1.21'), ext) AS ext
+                                '1.3.6.1.4.1.57264.1.21'), ext) AS ext_index  -- not "AS ext": a SELECT alias shadows the input column of the same name
 FROM file({file:String}, Parquet)
