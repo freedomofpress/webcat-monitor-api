@@ -88,8 +88,12 @@ def fetch(src, paths):
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     parsed = state.get("parsed", 0)         # bundles whose rows are in ClickHouse
     have_roots = roots_file.stat().st_size // 32 if roots_file.exists() else 0
-    # Rows from a chunk that was inserted but not recorded (crash in between) would be duplicated: clear them first.
-    ch(f"DELETE FROM webcat.entries WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")  # lightweight: masks rows, no part rewrite
+    # A crash between a chunk's inserts and its state write would duplicate that chunk on resume. The state carries a
+    # dirty flag across that window; only then is the (expensive, full-table) cleanup delete run.
+    if state.get("dirty"):
+        for t in ("entries", "claims", "sha"):
+            ch(f"DELETE FROM webcat.{t} WHERE log = '{name}' AND log_index >= {parsed * WIDTH}") if t != "claims" else None
+        state["dirty"] = False; state_file.write_text(json.dumps(state))
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
     def one(n):
@@ -122,15 +126,18 @@ def fetch(src, paths):
             # Invariant: a read-only archive file is complete and already loaded. It is never rewritten; a resume only
             # re-projects it into the index. A writable one is a leftover from a crash mid-write and is replaced.
             if apath.exists() and not (apath.stat().st_mode & 0o200) and have_roots >= end:
+                state["dirty"] = True; state_file.write_text(json.dumps(state))
                 for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
-                state.update({"origin": origin, "parsed": end}); state_file.write_text(json.dumps(state))
+                state.update({"origin": origin, "parsed": end, "dirty": False}); state_file.write_text(json.dumps(state))
                 logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
             results = list(ex.map(one, range(start, end)))
+            state["dirty"] = True; state_file.write_text(json.dumps(state))
             body = "\n".join(json.dumps(r) for _, rows in results for r in rows)
             ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
                "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
             for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
             apath.chmod(0o444)
+            state["dirty"] = False
             if end > have_roots:
                 rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush()
                 have_roots = end

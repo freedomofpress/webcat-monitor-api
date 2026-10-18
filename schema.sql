@@ -30,4 +30,4 @@ CREATE TABLE IF NOT EXISTS webcat.sha (
   sha FixedString(20),
   log LowCardinality(String),
   log_index UInt64
-) ENGINE = MergeTree ORDER BY (sha, log, log_index) SETTINGS storage_policy = 'hdd';
+) ENGINE = ReplacingMergeTree ORDER BY (sha, log, log_index) SETTINGS storage_policy = 'hdd';
