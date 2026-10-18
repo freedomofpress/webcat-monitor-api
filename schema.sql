@@ -11,3 +11,23 @@ CREATE TABLE IF NOT EXISTS webcat.entries (
   identity String CODEC(ZSTD(3)),                     -- SAN URI, else SAN email, else PGP user id, else sha256 of the key
   ext Map(LowCardinality(String), String) CODEC(ZSTD(3))  -- Fulcio + custom OIDs, minus per-entry noise (SHAs, run ids)
 ) ENGINE = MergeTree ORDER BY (identity, log, log_index);
+
+-- Skip index: which OIDs occur in each block. Makes any query on a rare (custom) OID touch only its blocks.
+ALTER TABLE webcat.entries ADD INDEX IF NOT EXISTS ext_keys mapKeys(ext) TYPE set(100) GRANULARITY 4;
+
+-- Claims side table: distinct (oid, value, identity). Values are nearly constant per identity, so this stays small
+-- (estimate 1-3 GB) while turning "which identities carry claim X" (exact or prefix) into a key range scan.
+-- The main table then resolves those identities on its own key. Built by build_claims.py, appended daily by the loaders.
+CREATE TABLE IF NOT EXISTS webcat.claims (
+  oid LowCardinality(String),
+  value String CODEC(ZSTD(3)),
+  identity String CODEC(ZSTD(3))
+) ENGINE = ReplacingMergeTree ORDER BY (oid, value, identity);
+
+-- Commit lookup: one row per (git SHA, entry). ~30 bytes/row, ~100 GB for the history, so it lives on the HDD
+-- (storage policy "hdd", see config.d/storage.xml). Exact SHA lookup is one seek on the sort key.
+CREATE TABLE IF NOT EXISTS webcat.sha (
+  sha FixedString(20),
+  log LowCardinality(String),
+  log_index UInt64
+) ENGINE = MergeTree ORDER BY (sha, log, log_index) SETTINGS storage_policy = 'hdd';

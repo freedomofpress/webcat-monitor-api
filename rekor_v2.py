@@ -19,7 +19,7 @@ FULCIO = "1.3.6.1.4.1.57264."
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT and authority info access; plus every 2.5.29.* (SAN is read separately)
 ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
                    "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, ext Map(String, String)")
-LOAD_SQL = pathlib.Path(__file__).with_name("load_v2.sql").read_text()
+LOAD_SQL = [q for q in pathlib.Path(__file__).with_name("load_v2.sql").read_text().split(";\n") if q.strip() and not q.strip().startswith("--") or "INSERT" in q]
 
 def tile_path(n):
     """tlog-tiles path element: 1234067 -> x001/x234/067, 5 -> 005."""
@@ -122,14 +122,14 @@ def fetch(src, paths):
             # Invariant: a read-only archive file is complete and already loaded. It is never rewritten; a resume only
             # re-projects it into the index. A writable one is a leftover from a crash mid-write and is replaced.
             if apath.exists() and not (apath.stat().st_mode & 0o200) and have_roots >= end:
-                ch(LOAD_SQL, params={"log": name, "file": archive})
+                for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
                 state.update({"origin": origin, "parsed": end}); state_file.write_text(json.dumps(state))
                 logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
             results = list(ex.map(one, range(start, end)))
             body = "\n".join(json.dumps(r) for _, rows in results for r in rows)
             ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
                "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
-            ch(LOAD_SQL, params={"log": name, "file": archive})
+            for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
             apath.chmod(0o444)
             if end > have_roots:
                 rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush()

@@ -1,0 +1,11 @@
+<clickhouse>
+  <!-- /etc/clickhouse-server/config.d/storage.xml: the HDD as a second disk for bulky tables (webcat.sha) -->
+  <storage_configuration>
+    <disks>
+      <hdd><path>/srv/archive/clickhouse/</path></hdd>
+    </disks>
+    <policies>
+      <hdd><volumes><main><disk>hdd</disk></main></volumes></hdd>
+    </policies>
+  </storage_configuration>
+</clickhouse>
