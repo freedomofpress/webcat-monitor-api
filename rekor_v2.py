@@ -8,7 +8,7 @@ from util import get, merkle_root
 
 WIDTH = 256
 ZSTD_LEVEL = 9  # measured: -9 is 8% under gzip -6, higher levels gain nothing on base64 certs
-WORKERS = 16
+WORKERS = 32
 CHUNK = 2000  # bundles per progress checkpoint
 
 def tile_path(n):
