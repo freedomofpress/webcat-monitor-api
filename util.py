@@ -23,9 +23,11 @@ def merkle_root(hashes):
     import hashlib
     return hashlib.sha256(b"\x01" + merkle_root(hashes[:k]) + merkle_root(hashes[k:])).digest()
 
-def ch(query, data=None):
-    """Run a query on the local ClickHouse over HTTP. data = request body (e.g. JSONEachRow rows for an INSERT)."""
+def ch(query, data=None, params=None):
+    """Run a query on the local ClickHouse over HTTP. data = request body (e.g. JSONEachRow rows for an INSERT);
+    params = values for {name:Type} placeholders in the query."""
     import urllib.parse
-    req = urllib.request.Request("http://127.0.0.1:8123/?" + urllib.parse.urlencode({"query": query}), data=data or None, method="POST")
+    q = {"query": query, **{"param_" + k: v for k, v in (params or {}).items()}}
+    req = urllib.request.Request("http://127.0.0.1:8123/?" + urllib.parse.urlencode(q), data=data or None, method="POST")
     with urllib.request.urlopen(req, timeout=600) as r:
         return r.read().decode()

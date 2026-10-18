@@ -1,9 +1,12 @@
-"""Rekor v2 (C2SP tlog-tiles): verify every entry bundle against its level-0 hash tile, parse each entry's
-certificate into one webcat.entries row, keep the hash tiles (32 bytes/entry, enough for the tree check),
-and drop the bundle. Tile roots are checked against the checkpoint root at the end of each run.
-Set keep_bundles = true on the source to also store bundles zstd-compressed (~540 bytes/entry)."""
-import base64, hashlib, json, logging, struct, time
+"""Rekor v2 (C2SP tlog-tiles): verify every entry bundle against its level-0 hash tile, extract each signer's
+certificate into an archive record (every claim-bearing field, same content as the v1 BigQuery export), write
+the records as one Parquet file per chunk under <archive>/rekor-v2/<name>/parsed/, load the index rows from
+that file with load_v2.sql, keep the hash tiles (32 bytes/entry, enough for the tree check) and drop the bundle.
+The index is a projection of the archive: rebuilding it is rerunning load_v2.sql over parsed/*.parquet.
+Set keep_bundles = true on a source to also keep the raw bundles zstd-compressed (~540 bytes/entry)."""
+import base64, hashlib, json, logging, pathlib, struct, time
 from concurrent.futures import ThreadPoolExecutor
+import urllib.parse
 import zstandard
 from cryptography import x509
 from util import get, merkle_root, ch
@@ -13,8 +16,10 @@ WORKERS = 32
 CHUNK = 2000   # bundles per insert + progress checkpoint
 ZSTD_LEVEL = 9
 FULCIO = "1.3.6.1.4.1.57264."
-ISSUER_OIDS = (FULCIO + "1.8", FULCIO + "1.1")
-NOISE = {FULCIO + s for s in ("1.1", "1.8", "1.3", "1.10", "1.13", "1.19", "1.15", "1.17", "1.21")}  # same set as load_v1.sql
+DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # SCT, key ids, usage, SAN: same as the v1 export
+ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
+                   "san_uris Array(String), san_emails Array(String), key_details String, key_digest String, ext Map(String, String)")
+LOAD_SQL = pathlib.Path(__file__).with_name("load_v2.sql").read_text()
 
 def tile_path(n):
     """tlog-tiles path element: 1234067 -> x001/x234/067, 5 -> 005."""
@@ -48,29 +53,29 @@ def verifiers(entry):
         for s in spec["dsseV002"]["signatures"]: yield kind, s["verifier"]
     else: raise ValueError(f"unknown v2 kind {kind}")
 
-def row(log, index, now, kind, v):
+def record(index, now, kind, v):
+    """Archive record for one signer: everything a claim could match on, nothing per-entry that cannot."""
+    r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00",
+         "san_uris": [], "san_emails": [], "key_details": v.get("keyDetails", ""), "key_digest": "", "ext": {}}
     if "x509Certificate" in v:
         cert = x509.load_der_x509_certificate(base64.b64decode(v["x509Certificate"]["rawBytes"]))
-        ext, identity = {}, ""
+        r["issuer_dn"] = cert.issuer.rfc4514_string()
+        r["not_before"] = cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S")
         for e in cert.extensions:
             oid = e.oid.dotted_string
             if oid == "2.5.29.17":
-                uris = e.value.get_values_for_type(x509.UniformResourceIdentifier)
-                mails = e.value.get_values_for_type(x509.RFC822Name)
-                identity = uris[0] if uris else mails[0] if mails else ""
-            elif oid.startswith(FULCIO) or isinstance(e.value, x509.UnrecognizedExtension):
-                ext[oid] = der_text(e.value.value)
-        issuer = next((ext[o] for o in ISSUER_OIDS if o in ext), None) or cert.issuer.rfc4514_string()
-        ext = {k: s for k, s in ext.items() if k not in NOISE}
+                r["san_uris"] = e.value.get_values_for_type(x509.UniformResourceIdentifier)
+                r["san_emails"] = e.value.get_values_for_type(x509.RFC822Name)
+            elif oid not in DROP:
+                r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
     else:
-        key = base64.b64decode(v["publicKey"]["rawBytes"])
-        issuer, identity, ext = v.get("keyDetails", "key"), hashlib.sha256(key).hexdigest(), {}
-    return {"log": log, "log_index": index, "time": now, "kind": kind, "issuer": issuer, "identity": identity, "ext": ext}
+        r["key_digest"] = hashlib.sha256(base64.b64decode(v["publicKey"]["rawBytes"])).hexdigest()
+    return r
 
 def fetch(src, paths):
     name, url, keep = src["name"], src["url"].rstrip("/"), src.get("keep_bundles", False)
     root = paths["archive"] / "rekor-v2" / name
-    root.mkdir(parents=True, exist_ok=True)
+    (root / "parsed").mkdir(parents=True, exist_ok=True)
     cp = get(url + "/checkpoint").decode()
     origin, size, root_hash = cp.split("\n")[0], int(cp.split("\n")[1]), base64.b64decode(cp.split("\n")[2])
     full, tail = divmod(size, WIDTH)
@@ -99,7 +104,7 @@ def fetch(src, paths):
             if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
                 raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
             entry = json.loads(e)
-            rows += [row(name, n * WIDTH + k, now, kind, v) for kind, v in verifiers(entry)]
+            rows += [record(n * WIDTH + k, now, kind, v) for kind, v in verifiers(entry)]
         hdst.parent.mkdir(parents=True, exist_ok=True)
         if not hdst.exists(): hdst.write_bytes(hashes)
         if keep and not bdst.exists():
@@ -113,7 +118,10 @@ def fetch(src, paths):
             end = min(start + CHUNK, full)
             results = list(ex.map(one, range(start, end)))
             body = "\n".join(json.dumps(r) for _, rows in results for r in rows)
-            ch("INSERT INTO webcat.entries FORMAT JSONEachRow", body.encode())
+            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"   # relative to ClickHouse user_files_path = the archive volume
+            ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
+               "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
+            ch(LOAD_SQL, params={"log": name, "file": archive})
             if end > have_roots:
                 rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush()
                 have_roots = end

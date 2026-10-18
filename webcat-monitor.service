@@ -3,6 +3,8 @@ Description=webcat-monitor: mirror and verify the logs WEBCAT trusts
 After=network-online.target srv-index.mount srv-archive.mount
 
 [Service]
+User=clickhouse
+Group=clickhouse
 Type=oneshot
 WorkingDirectory=/opt/webcat-monitor
 ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py
