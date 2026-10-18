@@ -10,6 +10,7 @@
 # - Snappy Parquet of base64 extension values was 1.4 TB. Decoding to bytes, dropping the SCT and key
 #   identifiers, clustering by LogIndex and extracting with ZSTD gives ~70 B/row, about 230 GB.
 # - FulcioExtensions is a decoded copy of OIDs already in Extensions; Format is empty for every row.
+# - Identities.ID is a random per-row UUID, not an identity: 36 incompressible bytes per row, drop it.
 # Dry run of the query below: 3.98 TB, ~25 USD. Egress of the Parquet: ~0.12 USD/GB.
 set -eu
 PROJECT=${PROJECT:-webcat-511408}
@@ -19,7 +20,7 @@ DATASET=rekor_export
 EXPORT_SQL='
 SELECT e.LogIndex, e.IntegratedTime, e.Kind,
        COALESCE(SAFE.FROM_HEX(e.EntryUUID), CAST(e.EntryUUID AS BYTES)) AS EntryUUID,
-       i.IdentityGoType, i.ID, i.Issuer, i.NotBefore,
+       i.IdentityGoType, i.Issuer, i.NotBefore,
        ARRAY(SELECT AS STRUCT x.Key, COALESCE(SAFE.FROM_BASE64(x.Value), CAST(x.Value AS BYTES)) AS Value, x.Critical
              FROM UNNEST(i.Extensions) x
              WHERE x.Key NOT IN ("1.3.6.1.4.1.11129.2.4.2","2.5.29.14","2.5.29.35","2.5.29.15","2.5.29.37","2.5.29.19")
