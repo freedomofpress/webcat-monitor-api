@@ -20,7 +20,7 @@ SELECT e.LogIndex, e.IntegratedTime, e.Kind, i.EntryUUID, i.Issuer, i.NotBefore,
        i.Extensions, i.SANExtensionURIs, i.SANExtensionEmailAddresses, i.Digests
 FROM \`bigquery-public-data.rekor.Identities\` i
 JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)" | grep -o 'bqjob_[a-z0-9_]*')
-  echo "identities job $JOB"; bq --project_id="$PROJECT" wait "$JOB" 0 >/dev/null; bq --project_id="$PROJECT" show -j "$JOB" | tail -3
+  echo "identities job $JOB"; bq --project_id="$PROJECT" wait "$JOB" >/dev/null; bq --project_id="$PROJECT" show -j "$JOB" | tail -3
   bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US \
      --destination_table="$DATASET.v1_artifacts" --replace --maximum_bytes_billed=100000000000 "
 SELECT EntryUUID, Digest, AttestationType, SubjectName
