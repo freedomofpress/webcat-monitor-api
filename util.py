@@ -28,6 +28,11 @@ def ch(query, data=None, params=None):
     params = values for {name:Type} placeholders in the query."""
     import urllib.parse
     q = {"query": query, **{"param_" + k: v for k, v in (params or {}).items()}}
-    req = urllib.request.Request("http://127.0.0.1:8123/?" + urllib.parse.urlencode(q), data=data or None, method="POST")
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return r.read().decode()
+    for n in range(20):  # the memory cap is shared with the v1 loader: a 5xx (usually MEMORY_LIMIT_EXCEEDED) is retried
+        req = urllib.request.Request("http://127.0.0.1:8123/?" + urllib.parse.urlencode(q), data=data or None, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                return r.read().decode()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or n == 19: raise
+            time.sleep(30)
