@@ -18,6 +18,12 @@ url = "https://test.sigsum.org/barreleye"
 key = "4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6"  # test log
 
 [[source]]
+name = "ginkgo"
+type = "sigsum"
+url = "https://ginkgo.tlog.mullvad.net"
+key = "f00c159663d09bbda6131ee1816863b6adcacfe80b0b288000b11aba8fe38314"  # production, Mullvad; from enrolled sites' log maps
+
+[[source]]
 name = "log2025-1"
 type = "rekor-v2"
 url = "https://log2025-1.rekor.sigstore.dev"  # shard rotates ~every 6 months; add the next one as a new block
