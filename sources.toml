@@ -1,0 +1,28 @@
+# Every log WEBCAT trusts. One [[source]] per instance; `type` picks the fetcher in monitor.py.
+# Adding another Sigsum or Rekor instance is a new block here, no code.
+
+[paths]
+index = "/srv/index"      # NVMe: databases and indexes
+archive = "/srv/archive"  # HDD: raw log mirrors
+
+[[source]]
+name = "seasalp"
+type = "sigsum"
+url = "https://seasalp.glasklar.is"
+key = "0ec7e16843119b120377a73913ac6acbc2d03d82432e2c36b841b09a95841f25"  # production, Glasklar
+
+[[source]]
+name = "barreleye"
+type = "sigsum"
+url = "https://test.sigsum.org/barreleye"
+key = "4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6"  # test log
+
+[[source]]
+name = "log2025-1"
+type = "rekor-v2"
+url = "https://log2025-1.rekor.sigstore.dev"  # shard rotates ~every 6 months; add the next one as a new block
+
+[[source]]
+name = "rekor-v1"
+type = "rekor-v1"
+url = "https://rekor.sigstore.dev"
