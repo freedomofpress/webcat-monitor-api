@@ -45,19 +45,6 @@ JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)" | grep -o 'bqjo
 SELECT EntryUUID, Digest, AttestationType, SubjectName
 FROM \`bigquery-public-data.rekor.Artifacts\`"   # LogIndex is attached locally via EntryUUID; the join would scan 0.3 TB
   ;;
-slim)      # second pass over the result table: ~3.5 TB scanned. Measured on a sample: 437 B/row Snappy -> ~70 B/row ZSTD.
-  JOB=$(bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US --nosync --format=none \
-     --destination_table="$DATASET.v1_slim" --replace --clustering_fields=LogIndex --maximum_bytes_billed=4000000000000 "
-SELECT LogIndex, IntegratedTime, Kind,
-       COALESCE(SAFE.FROM_HEX(EntryUUID), CAST(EntryUUID AS BYTES)) AS EntryUUID, Issuer, NotBefore,
-       ARRAY(SELECT AS STRUCT e.Key, COALESCE(SAFE.FROM_BASE64(e.Value), CAST(e.Value AS BYTES)) AS Value, e.Critical
-             FROM UNNEST(Extensions) e
-             WHERE e.Key NOT IN ('1.3.6.1.4.1.11129.2.4.2','2.5.29.14','2.5.29.35','2.5.29.15','2.5.29.37','2.5.29.19','2.5.29.17')) AS Extensions,
-       SANExtensionURIs, SANExtensionEmailAddresses,
-       IF(Issuer LIKE '%sigstore.dev%', NULL, Digests) AS Digests
-FROM $DATASET.v1_identities" | grep -o 'bqjob_[a-z0-9_]*')
-  echo "slim job $JOB"; bq --project_id="$PROJECT" wait "$JOB" >/dev/null
-  ;;
 extract)
   gcloud storage buckets create "$BUCKET" --project="$PROJECT" --location=US --uniform-bucket-level-access 2>/dev/null || true
   bq --project_id="$PROJECT" extract --location=US --destination_format=PARQUET --compression=ZSTD \
