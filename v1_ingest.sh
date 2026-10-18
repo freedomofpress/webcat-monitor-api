@@ -22,13 +22,18 @@ fi
 
 if [ "$step" = load ] || [ "$step" = all ]; then
   touch "$DONE"
+  sed "s/^INSERT INTO webcat.entries/INSERT INTO webcat.staging/" load_v1.sql > /tmp/load_v1_staging.sql
   n=0
   for f in "$DST"/v1/part-*.parquet; do
     rel=${f#/srv/archive/}
     grep -qx "$rel" "$DONE" && continue
-    clickhouse-client --param_file="$rel" --multiquery < load_v1.sql
+    # One file = one atomic step: load into an empty staging table, then attach its parts to the index.
+    clickhouse-client -n -q "DROP TABLE IF EXISTS webcat.staging; CREATE TABLE webcat.staging AS webcat.entries;"
+    clickhouse-client --param_file="$rel" --multiquery < /tmp/load_v1_staging.sql
+    clickhouse-client -q "ALTER TABLE webcat.entries ATTACH PARTITION ID 'all' FROM webcat.staging"
     echo "$rel" >> "$DONE"; n=$((n + 1))
     [ $((n % 200)) -eq 0 ] && echo "$(date -u +%FT%TZ) loaded $n files this run, $(wc -l < "$DONE") total"
   done
+  clickhouse-client -q "DROP TABLE IF EXISTS webcat.staging"
   echo "load complete: $(wc -l < "$DONE") files"
 fi
