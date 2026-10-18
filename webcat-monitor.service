@@ -5,6 +5,6 @@ After=network-online.target srv-index.mount srv-archive.mount
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/webcat-monitor
-ExecStart=/usr/bin/python3 -I /opt/webcat-monitor/monitor.py
+ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py
 Nice=10
 IOSchedulingClass=idle
