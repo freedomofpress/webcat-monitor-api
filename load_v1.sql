@@ -5,6 +5,8 @@
 -- issuer: Fulcio OIDC issuer (1.8, else 1.1), else the certificate issuer DN, else the Go key type.
 -- ext: every OID except the two issuer OIDs (moved to issuer), git SHAs 1.3/1.10/1.13/1.19, run ids 1.15/1.17,
 -- run invocation URI 1.21 and the raw SAN. Those are per-entry noise for an index.
+SET max_threads = 2, input_format_parquet_max_block_size = 8192, max_insert_block_size = 65536;  -- 5.8 GB box: keep the nested maps small per block
+
 CREATE FUNCTION IF NOT EXISTS derLen AS (v, i) ->  -- (length, header bytes) of the DER TLV whose length byte is at 1-based offset i
   if(reinterpretAsUInt8(substring(v, i, 1)) < 128,
      tuple(reinterpretAsUInt8(substring(v, i, 1)), 1),
