@@ -13,7 +13,7 @@ from util import get, merkle_root, ch
 
 WIDTH = 256
 WORKERS = 32
-CHUNK = 2000   # bundles per insert + progress checkpoint
+CHUNK = 500    # bundles per archive file + insert; 128k rows keeps ClickHouse under ~1 GB while v1 files load alongside
 ZSTD_LEVEL = 9
 FULCIO = "1.3.6.1.4.1.57264."
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # SCT, key ids, usage, SAN: same as the v1 export

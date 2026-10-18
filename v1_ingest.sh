@@ -28,8 +28,13 @@ if [ "$step" = load ] || [ "$step" = all ]; then
     rel=${f#/srv/archive/}
     grep -qx "$rel" "$DONE" && continue
     # One file = one atomic step: load into an empty staging table, then attach its parts to the index.
-    clickhouse-client -n -q "DROP TABLE IF EXISTS webcat.staging; CREATE TABLE webcat.staging AS webcat.entries;"
-    clickhouse-client --param_file="$rel" --multiquery < /tmp/load_v1_staging.sql
+    # Retry on failure: the memory cap is shared with the v2 fetcher, and a failed file leaves nothing in the index.
+    try=0
+    until clickhouse-client -n -q "DROP TABLE IF EXISTS webcat.staging; CREATE TABLE webcat.staging AS webcat.entries;" \
+          && clickhouse-client --param_file="$rel" --multiquery < /tmp/load_v1_staging.sql; do
+      try=$((try + 1)); [ $try -ge 20 ] && { echo "giving up on $rel"; exit 1; }
+      echo "retry $try for $rel"; sleep 30
+    done
     clickhouse-client -q "ALTER TABLE webcat.entries ATTACH PARTITION ID 'all' FROM webcat.staging"
     echo "$rel" >> "$DONE"; n=$((n + 1))
     [ $((n % 200)) -eq 0 ] && echo "$(date -u +%FT%TZ) loaded $n files this run, $(wc -l < "$DONE") total"
