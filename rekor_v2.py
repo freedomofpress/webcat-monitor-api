@@ -18,7 +18,7 @@ ZSTD_LEVEL = 9
 FULCIO = "1.3.6.1.4.1.57264."
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # SCT, key ids, usage, SAN: same as the v1 export
 ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
-                   "san_uris Array(String), san_emails Array(String), key_details String, key_digest String, ext Map(String, String)")
+                   "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, ext Map(String, String)")
 LOAD_SQL = pathlib.Path(__file__).with_name("load_v2.sql").read_text()
 
 def tile_path(n):
@@ -56,7 +56,7 @@ def verifiers(entry):
 def record(index, now, kind, v):
     """Archive record for one signer: everything a claim could match on, nothing per-entry that cannot."""
     r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00",
-         "san_uris": [], "san_emails": [], "key_details": v.get("keyDetails", ""), "key_digest": "", "ext": {}}
+         "san_uris": [], "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "", "ext": {}}
     if "x509Certificate" in v:
         cert = x509.load_der_x509_certificate(base64.b64decode(v["x509Certificate"]["rawBytes"]))
         r["issuer_dn"] = cert.issuer.rfc4514_string()
@@ -66,6 +66,7 @@ def record(index, now, kind, v):
             if oid == "2.5.29.17":
                 r["san_uris"] = e.value.get_values_for_type(x509.UniformResourceIdentifier)
                 r["san_emails"] = e.value.get_values_for_type(x509.RFC822Name)
+                r["san_other"] = [der_text(o.value) for o in e.value.get_values_for_type(x509.OtherName)]  # Fulcio username identities (1.3.6.1.4.1.57264.1.7)
             elif oid not in DROP:
                 r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
     else:
