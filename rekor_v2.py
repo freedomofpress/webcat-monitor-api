@@ -16,7 +16,7 @@ WORKERS = 32
 CHUNK = 500    # bundles per archive file + insert; 128k rows keeps ClickHouse under ~1 GB while v1 files load alongside
 ZSTD_LEVEL = 9
 FULCIO = "1.3.6.1.4.1.57264."
-DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # SCT, key ids, usage, SAN: same as the v1 export
+DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT and authority info access; plus every 2.5.29.* (SAN is read separately)
 ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
                    "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, ext Map(String, String)")
 LOAD_SQL = pathlib.Path(__file__).with_name("load_v2.sql").read_text()
@@ -67,7 +67,7 @@ def record(index, now, kind, v):
                 r["san_uris"] = e.value.get_values_for_type(x509.UniformResourceIdentifier)
                 r["san_emails"] = e.value.get_values_for_type(x509.RFC822Name)
                 r["san_other"] = [der_text(o.value) for o in e.value.get_values_for_type(x509.OtherName)]  # Fulcio username identities (1.3.6.1.4.1.57264.1.7)
-            elif oid not in DROP:
+            elif oid not in DROP and not oid.startswith("2.5.29."):  # standard X.509 extensions carry no claims
                 r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
     else:
         r["key_digest"] = hashlib.sha256(base64.b64decode(v["publicKey"]["rawBytes"])).hexdigest()
