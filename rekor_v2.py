@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from util import get, merkle_root
 
 WIDTH = 256
-ZSTD = zstandard.ZstdCompressor(level=9)  # measured: -9 is 8% under gzip -6, higher levels gain nothing on base64 certs
+ZSTD_LEVEL = 9  # measured: -9 is 8% under gzip -6, higher levels gain nothing on base64 certs
 WORKERS = 16
 CHUNK = 2000  # bundles per progress checkpoint
 
@@ -54,7 +54,7 @@ def fetch(src, paths):
             if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
                 raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
         for d in (dst, hdst): d.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.with_suffix(".tmp"); tmp.write_bytes(ZSTD.compress(bundle)); tmp.rename(dst)
+        tmp = dst.with_suffix(".tmp"); tmp.write_bytes(zstandard.compress(bundle, ZSTD_LEVEL))  # a ZstdCompressor instance is not thread safe; this makes one per call; tmp.rename(dst)
         hdst.write_bytes(hashes)
         return merkle_root([hashes[i:i + 32] for i in range(0, 32 * WIDTH, 32)])
 
