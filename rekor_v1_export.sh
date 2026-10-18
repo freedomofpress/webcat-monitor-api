@@ -13,13 +13,14 @@ DATASET=rekor_export
 
 case ${1:-} in
 query)
-  bq --project_id="$PROJECT" mk -f --location=US --dataset --default_table_expiration=604800 "$DATASET" >/dev/null
-  bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US \
+  bq --project_id="$PROJECT" mk -f --location=US --dataset "$DATASET" >/dev/null
+  JOB=$(bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US --nosync --format=none \
      --destination_table="$DATASET.v1_identities" --replace --maximum_bytes_billed=5000000000000 "
 SELECT e.LogIndex, e.IntegratedTime, e.Kind, i.EntryUUID, i.Issuer, i.NotBefore,
        i.Extensions, i.SANExtensionURIs, i.SANExtensionEmailAddresses, i.Digests
 FROM \`bigquery-public-data.rekor.Identities\` i
-JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)"
+JOIN \`bigquery-public-data.rekor.Entries\` e USING (EntryUUID)" | grep -o 'bqjob_[a-z0-9_]*')
+  echo "identities job $JOB"; bq --project_id="$PROJECT" wait "$JOB" 0 >/dev/null; bq --project_id="$PROJECT" show -j "$JOB" | tail -3
   bq --project_id="$PROJECT" query --use_legacy_sql=false --location=US \
      --destination_table="$DATASET.v1_artifacts" --replace --maximum_bytes_billed=100000000000 "
 SELECT EntryUUID, Digest, AttestationType, SubjectName
@@ -36,6 +37,11 @@ extract)
 download)  # run on the VM after `gcloud auth login --no-browser` there
   mkdir -p /srv/archive/rekor-v1/export
   gcloud storage rsync -r "$BUCKET/" /srv/archive/rekor-v1/export/
+  ;;
+verify)    # on the VM: every object present with the same size, then row counts per file are readable
+  gcloud storage ls -l -r "$BUCKET/**" | grep parquet | awk '{print $1, $3}' | sed "s|$BUCKET/||" | sort > /tmp/remote.txt
+  (cd /srv/archive/rekor-v1/export && find . -name '*.parquet' -printf '%s %P\n' | sort) > /tmp/local.txt
+  awk '{print $1, $2}' /tmp/remote.txt | sort > /tmp/r2.txt; diff /tmp/r2.txt /tmp/local.txt && echo "all objects match"
   ;;
 cleanup)   # after the download is verified: stop paying for the bucket and the result table
   gcloud storage rm -r "$BUCKET"
