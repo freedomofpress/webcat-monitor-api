@@ -9,7 +9,7 @@
     <policies>
       <tiered>
         <volumes>
-          <hot><disk>default</disk></hot>
+          <default><disk>default</disk></default>  <!-- must keep the name of the old policy's volume for ALTER ... storage_policy -->
           <cold><disk>hdd</disk></cold>
         </volumes>
         <move_factor>0.15</move_factor>
