@@ -20,7 +20,7 @@ DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT and authority inf
 ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
                    "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, key_raw String, "
                    "artifact_digest String, ext Map(String, String)")
-LOAD_SQL = [q for q in pathlib.Path(__file__).with_name("load_v2.sql").read_text().split(";\n") if q.strip() and not q.strip().startswith("--") or "INSERT" in q]
+LOAD_SQL = [q for q in pathlib.Path(__file__).with_name("load_v2.sql").read_text().split(";\n") if any(l.strip() and not l.strip().startswith("--") for l in q.split("\n"))]
 
 def tile_path(n):
     """tlog-tiles path element: 1234067 -> x001/x234/067, 5 -> 005."""

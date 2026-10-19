@@ -1,10 +1,19 @@
 <clickhouse>
-  <!-- /etc/clickhouse-server/config.d/storage.xml: the HDD as a second disk for bulky tables (webcat.sha) -->
+  <!-- /etc/clickhouse-server/config.d/storage.xml
+       default = NVMe (/srv/index), hdd = the archive volume. "tiered": parts live on the NVMe and move to the HDD
+       when it drops below 15% free; "hdd": HDD only, for large hash-keyed tables. -->
   <storage_configuration>
     <disks>
       <hdd><path>/srv/archive/clickhouse/</path></hdd>
     </disks>
     <policies>
+      <tiered>
+        <volumes>
+          <hot><disk>default</disk></hot>
+          <cold><disk>hdd</disk></cold>
+        </volumes>
+        <move_factor>0.15</move_factor>
+      </tiered>
       <hdd><volumes><main><disk>hdd</disk></main></volumes></hdd>
     </policies>
   </storage_configuration>

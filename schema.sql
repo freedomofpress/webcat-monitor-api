@@ -31,3 +31,32 @@ CREATE TABLE IF NOT EXISTS webcat.sha (
   log LowCardinality(String),
   log_index UInt64
 ) ENGINE = ReplacingMergeTree ORDER BY (sha, log, log_index) SETTINGS storage_policy = 'hdd';
+
+-- Tiering: NVMe while it fits, overflow to the HDD part by part (policy "tiered"). The SHA table stays HDD-only.
+ALTER TABLE webcat.entries MODIFY SETTING storage_policy = 'tiered';
+ALTER TABLE webcat.claims MODIFY SETTING storage_policy = 'tiered';
+
+-- Same rows as entries, ordered by (log, log_index): point lookups, "since index N" ranges, resolving SHA or
+-- artifact hits to rows, latest-entries feeds. ~25-30 GB for the history. Filled by the loaders and build_copies.py.
+CREATE TABLE IF NOT EXISTS webcat.entries_by_index AS webcat.entries
+  ENGINE = MergeTree ORDER BY (log, log_index) SETTINGS storage_policy = 'tiered';
+
+-- Narrow time-ordered copy: "what was signed between these dates", newest overall. ~10 GB for the history.
+CREATE TABLE IF NOT EXISTS webcat.entries_by_time (
+  time DateTime CODEC(Delta, ZSTD),
+  log LowCardinality(String),
+  log_index UInt64 CODEC(Delta, ZSTD),
+  kind LowCardinality(String),
+  issuer LowCardinality(String),
+  identity String CODEC(ZSTD(3))
+) ENGINE = MergeTree ORDER BY (time, log, log_index) SETTINGS storage_policy = 'tiered';
+
+-- Artifact digests of v2 entries (the v1 dataset has none): search by the hash an entry attests. HDD, ~40 B/row.
+CREATE TABLE IF NOT EXISTS webcat.artifact (
+  digest FixedString(32),
+  log LowCardinality(String),
+  log_index UInt64
+) ENGINE = ReplacingMergeTree ORDER BY (digest, log, log_index) SETTINGS storage_policy = 'hdd';
+
+-- Staging for one v2 chunk: projected once, fanned out to entries, entries_by_index and entries_by_time.
+CREATE TABLE IF NOT EXISTS webcat.stage_v2 AS webcat.entries ENGINE = Memory;

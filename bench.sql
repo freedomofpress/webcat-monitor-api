@@ -23,13 +23,25 @@ SELECT count() FROM webcat.entries WHERE mapContains(ext, '1.3.6.1.4.1.99999.42.
 SELECT count() FROM webcat.entries WHERE ext['1.3.6.1.4.1.99999.42.42'] = 'x';
 -- 9c. map scan without any index, the old shape, for reference
 SELECT count() FROM webcat.entries WHERE ext['1.3.6.1.4.1.57264.1.5'] = 'freedomofpress/securedrop';
--- 10. time range, no identity
+-- 10. time range, no identity, via the by-time copy
+SELECT count() FROM webcat.entries_by_time WHERE time BETWEEN '2026-10-01' AND '2026-10-02';
+-- 10b. the same on the main table (column scan, for reference)
 SELECT count() FROM webcat.entries WHERE time BETWEEN '2026-10-01' AND '2026-10-02';
+-- 10c. newest 50 entries overall
+SELECT time, log, log_index, identity FROM webcat.entries_by_time ORDER BY time DESC LIMIT 50 FORMAT Null;
 -- 11. pagination within an identity
 SELECT log_index FROM webcat.entries WHERE identity LIKE 'https://github.com/freedomofpress/%' AND log = 'rekor-v1' AND log_index > 3000000000 ORDER BY log_index LIMIT 100 FORMAT Null;
--- 12. point lookup by log index (not in the sort key)
+-- 12. point lookup by log index, via the by-index copy
+SELECT identity, issuer FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index = 3000000000;
+-- 12b. the same on the main table (column scan, for reference)
 SELECT identity, issuer FROM webcat.entries WHERE log = 'rekor-v1' AND log_index = 3000000000;
+-- 12c. everything since index N, first 100
+SELECT log_index, identity FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index > 3217000000 ORDER BY log_index LIMIT 100 FORMAT Null;
 -- 13. commit SHA lookup
 SELECT log, log_index FROM webcat.sha WHERE sha = unhex('06e0a2a35efa7c4b6c8771e080a805ed3bf72dd6');
 -- 14. claims table alone: identities for a repo prefix
 SELECT count() FROM webcat.claims WHERE oid = '1.3.6.1.4.1.57264.1.12' AND value LIKE 'https://github.com/freedomofpress/%';
+-- 15. SHA hit resolved to its rows
+SELECT e.identity, e.issuer FROM webcat.sha AS s INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE s.sha = unhex('06e0a2a35efa7c4b6c8771e080a805ed3bf72dd6');
+-- 16. artifact digest lookup (v2 only)
+SELECT log, log_index FROM webcat.artifact WHERE digest = unhex('4f0a230f351e315bef22714ff5f85798c9103fba7c66f87e76942d8fcb33e8ee');
