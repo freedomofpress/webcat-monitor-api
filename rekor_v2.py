@@ -18,7 +18,8 @@ ZSTD_LEVEL = 9
 FULCIO = "1.3.6.1.4.1.57264."
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT and authority info access; plus every 2.5.29.* (SAN is read separately)
 ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
-                   "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, ext Map(String, String)")
+                   "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, key_raw String, "
+                   "artifact_digest String, ext Map(String, String)")
 LOAD_SQL = [q for q in pathlib.Path(__file__).with_name("load_v2.sql").read_text().split(";\n") if q.strip() and not q.strip().startswith("--") or "INSERT" in q]
 
 def tile_path(n):
@@ -46,17 +47,22 @@ def der_text(b):
     return b.decode("utf-8", "replace")
 
 def verifiers(entry):
-    """Yield (kind, verifier dict) for every signer in a v2 entry body."""
+    """Yield (kind, verifier dict, artifact digest hex) for every signer in a v2 entry body."""
     kind, spec = entry["kind"], entry["spec"]
-    if kind == "hashedrekord": yield kind, spec["hashedRekordV002"]["signature"]["verifier"]
+    if kind == "hashedrekord":
+        h = spec["hashedRekordV002"]
+        yield kind, h["signature"]["verifier"], base64.b64decode(h["data"]["digest"]).hex()
     elif kind == "dsse":
-        for s in spec["dsseV002"]["signatures"]: yield kind, s["verifier"]
+        d = spec["dsseV002"]
+        for s in d["signatures"]: yield kind, s["verifier"], base64.b64decode(d["payloadHash"]["digest"]).hex()
     else: raise ValueError(f"unknown v2 kind {kind}")
 
-def record(index, now, kind, v):
-    """Archive record for one signer: everything a claim could match on, nothing per-entry that cannot."""
+def record(index, now, kind, v, digest):
+    """Archive record for one signer: everything a claim could match on, the artifact digest, and the raw key for
+    key-based signers. time is our fetch time: a v2 leaf carries no timestamp; the index uses not_before instead."""
     r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00",
-         "san_uris": [], "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "", "ext": {}}
+         "san_uris": [], "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "",
+         "key_raw": "", "artifact_digest": digest, "ext": {}}
     if "x509Certificate" in v:
         cert = x509.load_der_x509_certificate(base64.b64decode(v["x509Certificate"]["rawBytes"]))
         r["issuer_dn"] = cert.issuer.rfc4514_string()
@@ -70,7 +76,8 @@ def record(index, now, kind, v):
             elif oid not in DROP and not oid.startswith("2.5.29."):  # standard X.509 extensions carry no claims
                 r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
     else:
-        r["key_digest"] = hashlib.sha256(base64.b64decode(v["publicKey"]["rawBytes"])).hexdigest()
+        r["key_raw"] = v["publicKey"]["rawBytes"]
+        r["key_digest"] = hashlib.sha256(base64.b64decode(r["key_raw"])).hexdigest()
     return r
 
 def fetch(src, paths):
@@ -109,7 +116,7 @@ def fetch(src, paths):
             if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
                 raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
             entry = json.loads(e)
-            rows += [record(n * WIDTH + k, now, kind, v) for kind, v in verifiers(entry)]
+            rows += [record(n * WIDTH + k, now, kind, v, digest) for kind, v, digest in verifiers(entry)]
         hdst.parent.mkdir(parents=True, exist_ok=True)
         if not hdst.exists(): hdst.write_bytes(hashes); hdst.chmod(0o444)
         if keep and not bdst.exists():

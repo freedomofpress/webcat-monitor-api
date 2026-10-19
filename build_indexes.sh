@@ -4,6 +4,7 @@
 set -eu
 cd /opt/webcat-monitor
 clickhouse-client --multiquery < schema.sql
+echo "$(date -u +%FT%TZ) re-projecting v2 (index time = cert not_before)"; ./reproject_v2.sh log2025-1
 echo "$(date -u +%FT%TZ) materializing the keys index"
 clickhouse-client -q "ALTER TABLE webcat.entries MATERIALIZE INDEX ext_keys SETTINGS mutations_sync = 0"
 until [ "$(clickhouse-client -q "SELECT count() FROM system.mutations WHERE table = 'entries' AND NOT is_done")" = 0 ]; do sleep 60; done

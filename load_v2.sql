@@ -7,7 +7,7 @@ INSERT INTO webcat.entries
 SELECT
   {log:String} AS log,
   log_index,
-  time,
+  if(not_before > toDateTime('2000-01-01'), not_before, time) AS time,  -- cert issuance is within minutes of signing; the leaf has no timestamp
   kind,
   multiIf(
     mapContains(ext, '1.3.6.1.4.1.57264.1.8'), ext['1.3.6.1.4.1.57264.1.8'],
