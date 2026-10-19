@@ -80,6 +80,56 @@ def record(index, now, kind, v, digest):
         r["key_digest"] = hashlib.sha256(base64.b64decode(r["key_raw"])).hexdigest()
     return r
 
+def process_bundle(name, url, root, n, now, keep, force=False):
+    """Fetch (or read) bundle n, verify every entry against its level-0 hash tile, return (subtree root, archive rows).
+    force=True ignores a stored bundle and refetches, for archive rewrites."""
+    p = tile_path(n)
+    bdst, hdst = root / "tile" / "entries" / (p + ".zst"), root / "tile" / "0" / p
+    bundle = zstandard.decompress(bdst.read_bytes()) if bdst.exists() and not force else get(f"{url}/tile/entries/{p}")
+    hashes = hdst.read_bytes() if hdst.exists() else get(f"{url}/tile/0/{p}")
+    if len(hashes) != 32 * WIDTH: raise RuntimeError(f"{name}: hash tile {n} is not full")
+    entries = split_bundle(bundle)
+    if len(entries) != WIDTH: raise RuntimeError(f"{name}: bundle {n} has {len(entries)} entries")
+    rows = []
+    for k, e in enumerate(entries):
+        if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
+            raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
+        entry = json.loads(e)
+        rows += [record(n * WIDTH + k, now, kind, v, digest) for kind, v, digest in verifiers(entry)]
+    hdst.parent.mkdir(parents=True, exist_ok=True)
+    if not hdst.exists(): hdst.write_bytes(hashes); hdst.chmod(0o444)
+    if keep and not bdst.exists():
+        bdst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = bdst.with_suffix(".tmp"); tmp.write_bytes(zstandard.compress(bundle, ZSTD_LEVEL)); tmp.rename(bdst)
+    elif not keep and bdst.exists(): bdst.unlink()
+    return merkle_root([hashes[i:i + 32] for i in range(0, 32 * WIDTH, 32)]), rows
+
+def write_archive(name, archive, rows):
+    """Write one chunk's rows as a Parquet file through ClickHouse (relative to its user_files_path)."""
+    body = "\n".join(json.dumps(r) for r in rows)
+    ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
+       "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
+
+def rewrite_archive(src, paths, until):
+    """Refetch bundles [0, until) and rewrite their archive chunks with the current record schema. Index rows are not
+    touched: run reproject_v2.sh afterwards. Chunk boundaries follow CHUNK; files are replaced atomically."""
+    name, url = src["name"], src["url"].rstrip("/")
+    root = paths["archive"] / "rekor-v2" / name
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    done_file = root / "rewrite.done"
+    done = set(done_file.read_text().split()) if done_file.exists() else set()
+    with ThreadPoolExecutor(WORKERS) as ex:
+        for start in range(0, until, CHUNK):
+            if str(start) in done: continue
+            end = min(start + CHUNK, until)
+            results = list(ex.map(lambda n: process_bundle(name, url, root, n, now, False, force=True), range(start, end)))
+            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"
+            apath = paths["archive"] / archive
+            if apath.exists(): apath.chmod(0o644)
+            write_archive(name, archive, [r for _, rows in results for r in rows]); apath.chmod(0o444)
+            with done_file.open("a") as f: f.write(f"{start}\n")
+            logging.info("%s: rewrote archive chunk %d-%d", name, start, end)
+
 def fetch(src, paths):
     name, url, keep = src["name"], src["url"].rstrip("/"), src.get("keep_bundles", False)
     root = paths["archive"] / "rekor-v2" / name
@@ -103,28 +153,6 @@ def fetch(src, paths):
         state["dirty"] = False; state_file.write_text(json.dumps(state))
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
-    def one(n):
-        p = tile_path(n)
-        bdst, hdst = root / "tile" / "entries" / (p + ".zst"), root / "tile" / "0" / p
-        bundle = zstandard.decompress(bdst.read_bytes()) if bdst.exists() else get(f"{url}/tile/entries/{p}")
-        hashes = hdst.read_bytes() if hdst.exists() else get(f"{url}/tile/0/{p}")
-        if len(hashes) != 32 * WIDTH: raise RuntimeError(f"{name}: hash tile {n} is not full")
-        entries = split_bundle(bundle)
-        if len(entries) != WIDTH: raise RuntimeError(f"{name}: bundle {n} has {len(entries)} entries")
-        rows = []
-        for k, e in enumerate(entries):
-            if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
-                raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
-            entry = json.loads(e)
-            rows += [record(n * WIDTH + k, now, kind, v, digest) for kind, v, digest in verifiers(entry)]
-        hdst.parent.mkdir(parents=True, exist_ok=True)
-        if not hdst.exists(): hdst.write_bytes(hashes); hdst.chmod(0o444)
-        if keep and not bdst.exists():
-            bdst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = bdst.with_suffix(".tmp"); tmp.write_bytes(zstandard.compress(bundle, ZSTD_LEVEL)); tmp.rename(bdst)
-        elif not keep and bdst.exists(): bdst.unlink()
-        return merkle_root([hashes[i:i + 32] for i in range(0, 32 * WIDTH, 32)]), rows
-
     with ThreadPoolExecutor(WORKERS) as ex, roots_file.open("r+b" if roots_file.exists() else "wb") as rf:
         for start in range(parsed, full, CHUNK):
             end = min(start + CHUNK, full)
@@ -137,11 +165,9 @@ def fetch(src, paths):
                 for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
                 state.update({"origin": origin, "parsed": end, "dirty": False}); state_file.write_text(json.dumps(state))
                 logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
-            results = list(ex.map(one, range(start, end)))
+            results = list(ex.map(lambda n: process_bundle(name, url, root, n, now, keep), range(start, end)))
             state["dirty"] = True; state_file.write_text(json.dumps(state))
-            body = "\n".join(json.dumps(r) for _, rows in results for r in rows)
-            ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
-               "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
+            write_archive(name, archive, [r for _, rows in results for r in rows])
             for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
             apath.chmod(0o444)
             state["dirty"] = False

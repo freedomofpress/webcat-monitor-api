@@ -19,6 +19,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--config", default=pathlib.Path(__file__).with_name("sources.toml"))
     ap.add_argument("names", nargs="*")
+    ap.add_argument("--rewrite-archive", type=int, metavar="UNTIL_BUNDLE", help="rekor-v2 only: refetch bundles [0, N) and rewrite their archive chunks")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = tomllib.loads(pathlib.Path(a.config).read_text())
@@ -27,6 +28,9 @@ def main():
     for src in cfg["source"]:
         if a.names and src["name"] not in a.names: continue
         try:
+            if a.rewrite_archive is not None:
+                if src["type"] == "rekor-v2": rekor_v2.rewrite_archive(src, paths, a.rewrite_archive)
+                continue
             FETCHERS[src["type"]](src, paths)
         except Exception:
             logging.exception("%s failed", src["name"]); failed += 1

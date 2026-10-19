@@ -4,6 +4,8 @@
 set -eu
 cd /opt/webcat-monitor
 clickhouse-client --multiquery < schema.sql
+echo "$(date -u +%FT%TZ) rewriting early v2 archive chunks with the full record (artifact digest, raw keys)"
+python3 monitor.py --rewrite-archive 306000 log2025-1
 echo "$(date -u +%FT%TZ) re-projecting v2 (index time = cert not_before)"; ./reproject_v2.sh log2025-1
 echo "$(date -u +%FT%TZ) materializing the keys index"
 clickhouse-client -q "ALTER TABLE webcat.entries MATERIALIZE INDEX ext_keys SETTINGS mutations_sync = 0"
