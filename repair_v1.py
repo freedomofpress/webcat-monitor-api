@@ -12,7 +12,9 @@ from sample_v1 import cert_from_body
 from util import ch, record_status
 
 BUDGET = 60000
-WORKERS = 6
+WORKERS = 2
+RATE = 3.0                  # requests per second across workers; Rekor answers 429 well below the earlier 9/s
+_last = [0.0]; _gate = __import__("threading").Lock()
 NO_CERT_KINDS = ("rfc3161", "tuf")
 PLACEHOLDER = ("ifNull(Issuer, '') = '' AND length(Extensions) = 0 AND length(SANExtensionURIs) = 0 AND length(SANExtensionEmailAddresses) = 0 "
                "AND length(Digests) = 0 AND length(PGPIdentities) = 0 AND ifNull(IdentityGoType, '') != 'none'")
@@ -27,14 +29,24 @@ STAGE = ("CREATE TABLE IF NOT EXISTS webcat.stage_repair (LogIndex Int64, Integr
          "SANExtensionURIs Array(String), SANExtensionEmailAddresses Array(String)) ENGINE = Memory")
 
 def fetch_entry(url, idx):
-    req = urllib.request.Request(f"{url}/api/v1/log/entries?logIndex={idx}", headers={"User-Agent": "webcat-monitor"})
-    for n in range(5):
+    req = urllib.request.Request(f"{url}/api/v1/log/entries?logIndex={idx}", headers={"User-Agent": "webcat-monitor (log auditor, contact: webcat@freedom.press)"})
+    for n in range(10):
+        with _gate:  # token-bucket-lite: one request per 1/RATE seconds across all workers
+            wait = _last[0] + 1.0 / RATE - time.monotonic()
+            if wait > 0: time.sleep(wait)
+            _last[0] = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 uuid, v = next(iter(json.loads(r.read()).items())); return uuid, v
-        except Exception:
-            if n == 4: raise
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                time.sleep(float(e.headers.get("Retry-After", 30))); continue
+            if n == 9: raise
             time.sleep(2 ** n)
+        except Exception:
+            if n == 9: raise
+            time.sleep(2 ** n)
+    raise RuntimeError(f"rekor-v1 repair: gave up fetching {idx}")
 
 def export_row(uuid, v):
     """A row in the export's schema from a live entry; the certificate dissected the way the dataset does it."""
