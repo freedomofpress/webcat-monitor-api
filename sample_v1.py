@@ -23,8 +23,8 @@ def cert_from_body(body):
 
 def check(src):
     url = src["url"].rstrip("/")
-    rows = ch(f"SELECT log_index FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND rand() % 20000 = 0 LIMIT {SAMPLE * 3} SETTINGS max_threads = 2 FORMAT JSONEachRow")
-    idxs = random.sample([int(json.loads(l)["log_index"]) for l in rows.strip().split("\n") if l], SAMPLE)
+    top = int(ch("SELECT log_index FROM webcat.entries_by_index WHERE log = 'rekor-v1' ORDER BY log_index DESC LIMIT 1 FORMAT TSV").strip())
+    idxs = random.sample(range(top + 1), SAMPLE)  # uniform over the index range; entries without an identity row are legitimate misses
     problems, checked, with_cert = [], 0, 0
     for i in idxs:
         e = json.loads(get(f"{url}/api/v1/log/entries?logIndex={i}").decode())
@@ -43,7 +43,7 @@ def check(src):
         issuer = r["ext"].get("1.3.6.1.4.1.57264.1.8") or r["ext"].get("1.3.6.1.4.1.57264.1.1") or r["issuer_dn"]
         idents = set(r["san_uris"] + r["san_emails"] + r["san_other"])
         got = [json.loads(l) for l in ch(f"SELECT identity, issuer, ext FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index = {i} FORMAT JSONEachRow").strip().split("\n") if l]
-        if not got: problems.append({"index": i, "what": "missing from the index"}); continue
+        if not got: problems.append({"index": i, "what": "certificate in the log but no identity row in the index"}); continue
         if idents and not idents & {g["identity"] for g in got}: problems.append({"index": i, "what": "identity", "index_has": [g["identity"] for g in got], "cert_has": sorted(idents)})
         if got[0]["issuer"] != issuer: problems.append({"index": i, "what": "issuer", "index_has": got[0]["issuer"], "cert_has": issuer})
         claims = {k: v for k, v in r["ext"].items() if k.startswith("1.3.6.1.4.1.57264.1.") and k.split(".")[-1] in ("2", "4", "5", "6", "9", "11", "12", "14", "16", "18", "20", "22", "23", "24")}
