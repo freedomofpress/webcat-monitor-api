@@ -140,9 +140,12 @@ def replace_index_rows(indices):
     ch(f"DELETE FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index IN ({ids})")
     ch(f"DELETE FROM webcat.entries_by_time WHERE time IN ({times}) AND log = 'rekor-v1' AND log_index IN ({ids})")
 
-def repair_file(url, paths, rel, idxs):
-    """Replace the placeholder rows of one export file. Returns (entries fetched, entries given an identity)."""
-    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()]
+def repair_file(url, paths, rel, idxs, missing=()):
+    """Replace the placeholder rows of one export file, and add rows for `missing` indices the dataset never had.
+    Returns (entries fetched, entries given an identity)."""
+    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()] if idxs else []
+    absent = [i for i in missing if not ch(f"SELECT 1 FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex = {i} LIMIT 1 FORMAT TSV").strip()]
+    present = present + absent
     if not present: return 0, 0
     with ThreadPoolExecutor(WORKERS) as ex: fetched = [f for f in ex.map(lambda i: fetch_entry(url, i), present) if f]
     present = [v["logIndex"] for _, v in fetched]
@@ -163,7 +166,7 @@ def repair_file(url, paths, rel, idxs):
        f"max_threads = 1, max_memory_usage = 1500000000, input_format_parquet_use_native_reader = 1 "
        f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN ({ids}) AND {PLACEHOLDER}) UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
     old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) FORMAT TSV").strip()) for f in (rel, tmp))
-    if old != new: raise RuntimeError(f"{rel}: row count changed {old} -> {new}, not replacing")
+    if new != old + len(absent): raise RuntimeError(f"{rel}: row count {old} -> {new}, expected {old + len(absent)}, not replacing")
     os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444); os.chmod(d, 0o555)
     replace_index_rows(present)
     subprocess.run(["clickhouse-client", f"--param_file={repl}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
@@ -177,15 +180,19 @@ def repair(src, paths, budget=BUDGET):
     url = src["url"].rstrip("/")
     ranges = file_ranges(paths)
     queue = [int(x) for x in ch(f"SELECT DISTINCT log_index FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND kind NOT IN {NO_CERT_KINDS} ORDER BY log_index LIMIT {budget} FORMAT TSV").split()]
-    logging.info("rekor-v1 repair: %d placeholder rows queued (budget %d)", len(queue), budget)
+    missing_file = pathlib.Path("/srv/index/v1_missing.json")
+    missing = json.loads(missing_file.read_text()) if missing_file.exists() else []   # from the leaf-list check: absent from the dataset
+    logging.info("rekor-v1 repair: %d placeholder rows and %d missing entries queued (budget %d)", len(queue), len(missing), budget)
     fetched = fixed = files = 0
     for rel, (lo, hi) in sorted(ranges.items(), key=lambda kv: kv[1][0]):
         idxs = [i for i in queue if lo <= i <= hi]
-        if not idxs: continue
-        n, k = repair_file(url, paths, rel, idxs)
+        gaps = [i for i in missing if lo <= i <= hi]
+        if not idxs and not gaps: continue
+        n, k = repair_file(url, paths, rel, idxs, gaps)
         if n:
             fetched += n; fixed += k; files += 1
             logging.info("rekor-v1 repair: %s: %d rows replaced, %d given an identity (%d fetched so far)", rel, n, k, fetched)
+    if missing: missing_file.unlink()  # fetched or confirmed unservable; the next leaf-list run re-reports what is still absent
     left = int(ch(f"SELECT count() FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND kind NOT IN {NO_CERT_KINDS}").strip() or 0)
     record_status("rekor-v1-repair", {"files_rewritten": files, "fetched": fetched, "repaired_this_run": fixed, "remaining": left})
     logging.info("rekor-v1 repair: %d files rewritten, %d entries given an identity, %d placeholder rows remaining", files, fixed, left)

@@ -171,8 +171,10 @@ def rekor_v1_leaves(src):
         if f.size == size:
             ok, how = f.root() == root, "root matches the signed tree head"
         elif f.size < size:
+            # the proof is for lastSize = the signed size; the endpoint's own rootHash is the root at the *current* size
+            # of a growing tree, so the signed (size, root) pair is the anchor and that field is ignored
             p = json.loads(get(f"{url}/api/v1/log/proof?firstSize={f.size}&lastSize={size}&treeID={tid}").decode())
-            ok = verify_consistency(f.size, size, f.root(), root, [bytes.fromhex(x) for x in p["hashes"]]) and bytes.fromhex(p["rootHash"]) == root
+            ok = verify_consistency(f.size, size, f.root(), root, [bytes.fromhex(x) for x in p["hashes"]])
             how = f"prefix of {f.size} consistent with the signed tree head at {size}"
         else:
             ok, how = False, f"we hold {f.size} leaves but the log reports {size}"
