@@ -76,7 +76,7 @@ def record(index, now, kind, v, digest):
                 r["san_other"] = [der_text(o.value) for o in e.value.get_values_for_type(x509.OtherName)]  # Fulcio username identities (1.3.6.1.4.1.57264.1.7)
             elif oid not in DROP and not oid.startswith("2.5.29."):  # standard X.509 extensions carry no claims
                 r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
-    else:
+    elif v.get("publicKey", {}).get("rawBytes"):
         r["key_raw"] = v["publicKey"]["rawBytes"]
         r["key_digest"] = hashlib.sha256(base64.b64decode(r["key_raw"])).hexdigest()
     return r

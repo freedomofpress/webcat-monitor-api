@@ -9,54 +9,55 @@ from rekor_v2 import record, ARCHIVE_COLUMNS, write_archive, LOAD_SQL
 from sample_v1 import cert_from_body
 from util import ch, record_status
 
-BUDGET_REQUESTS = 6000      # x10 entries: ~60k entries per run, the backlog clears in ~6 weeks of nightly runs
-BATCH_FILES = 50            # requests per archive chunk (500 entries)
+BUDGET = 60000              # entries per nightly run; the one-time backlog run passes the full count
+CHUNK = 2000                # entries per archive file
+WORKERS = 6                 # concurrent single-entry fetches: ~15 entries/s, the batch endpoint is slower per entry
 NO_CERT_KINDS = ("rfc3161", "tuf")
 
-def retrieve(url, idxs):
-    req = urllib.request.Request(url + "/api/v1/log/entries/retrieve", data=json.dumps({"logIndexes": idxs}).encode(), headers={"content-type": "application/json", "User-Agent": "webcat-monitor"})
+def fetch_entry(url, idx):
+    req = urllib.request.Request(f"{url}/api/v1/log/entries?logIndex={idx}", headers={"User-Agent": "webcat-monitor"})
     for n in range(5):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r: return json.loads(r.read())
+            with urllib.request.urlopen(req, timeout=60) as r: return next(iter(json.loads(r.read()).values()))
         except Exception:
             if n == 4: raise
             time.sleep(2 ** n)
 
-def run(src, paths, budget=BUDGET_REQUESTS):
+def run(src, paths, budget=BUDGET):
+    from concurrent.futures import ThreadPoolExecutor
     url = src["url"].rstrip("/")
     root = paths["archive"] / "rekor-v1" / "repaired"; root.mkdir(parents=True, exist_ok=True)
-    q = f"SELECT DISTINCT log_index, toUnixTimestamp(time) FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND kind NOT IN {NO_CERT_KINDS} ORDER BY log_index LIMIT {budget * 10} FORMAT TSV"
+    q = f"SELECT DISTINCT log_index, toUnixTimestamp(time) FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND kind NOT IN {NO_CERT_KINDS} ORDER BY log_index LIMIT {budget} FORMAT TSV"
     when = {int(a): int(b) for a, b in (l.split("\t") for l in ch(q).strip().split("\n") if l)}
     queue = sorted(when)
-    logging.info("rekor-v1 repair: %d placeholder rows queued (budget %d requests)", len(queue), budget)
-    done = fixed = 0
-    for start in range(0, len(queue), BATCH_FILES * 10):
-        batch = queue[start:start + BATCH_FILES * 10]
-        rows, resolved = [], []
-        for i in range(0, len(batch), 10):
-            for e in retrieve(url, batch[i:i + 10]):
-                uuid, v = next(iter(e.items()))
-                body = json.loads(base64.b64decode(v["body"]))
-                cert = cert_from_body(body)
-                resolved.append(v["logIndex"])
-                if not cert: continue
-                r = record(v["logIndex"], time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(v["integratedTime"])), body["kind"],
-                           {"x509Certificate": {"rawBytes": base64.b64encode(cert.public_bytes(Encoding.DER)).decode()}}, "")
-                rows.append(r); fixed += 1
-            done += 1
+    logging.info("rekor-v1 repair: %d placeholder rows queued (budget %d entries)", len(queue), budget)
+    done = fixed = 0; resolved = []
+    with ThreadPoolExecutor(WORKERS) as ex:
+      for start in range(0, len(queue), CHUNK):
+        batch = queue[start:start + CHUNK]
+        rows = []
+        for v in ex.map(lambda i: fetch_entry(url, i), batch):
+            body = json.loads(base64.b64decode(v["body"]))
+            cert = cert_from_body(body)
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(v["integratedTime"]))
+            resolved.append(v["logIndex"]); done += 1
+            if cert:
+                rows.append(record(v["logIndex"], t, body["kind"], {"x509Certificate": {"rawBytes": base64.b64encode(cert.public_bytes(Encoding.DER)).decode()}}, "")); fixed += 1
+            else:  # no certificate in the log either: an explicit row (issuer "none") replaces the placeholder so it leaves the queue
+                rows.append(record(v["logIndex"], t, body["kind"], {"keyDetails": "none", "publicKey": {"rawBytes": ""}}, ""))
         tag = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         archive = f"rekor-v1/repaired/{tag}-{batch[0]}.parquet"
-        if rows:
-            write_archive("rekor-v1", archive, rows); (paths["archive"] / archive).chmod(0o444)
-            for stmt in LOAD_SQL: ch(stmt, params={"log": "rekor-v1", "file": archive})
-        # the repaired (or confirmed certificate-less) placeholders leave the queue; each delete rides its table's key
+        write_archive("rekor-v1", archive, rows); (paths["archive"] / archive).chmod(0o444)
+        for stmt in LOAD_SQL: ch(stmt, params={"log": "rekor-v1", "file": archive})
+        logging.info("rekor-v1 repair: %d entries fetched, %d repaired so far", done, fixed)
+    # placeholders leave the queue in one delete per table, each riding its table's key
+    if resolved:
         ids = ",".join(map(str, resolved)); times = ",".join(str(when[i]) for i in resolved if i in when)
-        ch(f"DELETE FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND log_index IN ({ids})")
-        ch(f"DELETE FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index IN ({ids}) AND identity = ''")
-        if times: ch(f"DELETE FROM webcat.entries_by_time WHERE time IN ({times}) AND log = 'rekor-v1' AND identity = ''")
-        logging.info("rekor-v1 repair: %d requests, %d entries repaired so far", done, fixed)
-    left = int(ch(f"SELECT count() FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND kind NOT IN {NO_CERT_KINDS}").strip() or 0)
-    record_status("rekor-v1-repair", {"repaired_this_run": fixed, "requests": done, "remaining": left})
+        ch(f"DELETE FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND log_index IN ({ids})")
+        ch(f"DELETE FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index IN ({ids}) AND identity = '' AND issuer = ''")
+        if times: ch(f"DELETE FROM webcat.entries_by_time WHERE time IN ({times}) AND log = 'rekor-v1' AND identity = '' AND issuer = ''")
+    left = int(ch(f"SELECT count() FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND kind NOT IN {NO_CERT_KINDS}").strip() or 0)
+    record_status("rekor-v1-repair", {"repaired_this_run": fixed, "fetched": done, "remaining": left})
     logging.info("rekor-v1 repair: %d repaired this run, %d placeholder rows remaining", fixed, left)
 
 if __name__ == "__main__":
@@ -64,4 +65,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = tomllib.loads(pathlib.Path(__file__).with_name("sources.toml").read_text())
     paths = {k: pathlib.Path(v) for k, v in cfg["paths"].items()}
-    run(next(s for s in cfg["source"] if s["type"] == "rekor-v1"), paths, int(sys.argv[1]) if len(sys.argv) > 1 else BUDGET_REQUESTS)
+    run(next(s for s in cfg["source"] if s["type"] == "rekor-v1"), paths, int(sys.argv[1]) if len(sys.argv) > 1 else BUDGET)
