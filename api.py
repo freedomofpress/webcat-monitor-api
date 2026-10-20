@@ -10,23 +10,22 @@
   GET /v1/sha/<40 hex>          git commit SHA -> entries
   GET /v1/artifact/<64 hex>     artifact digest -> entries (Rekor v2 only)
 
-Claim semantics are the extension's ClaimPolicy: every claim must match; a value starting with "^" is a prefix;
-the SAN claim (2.5.29.17) matches any SAN. Queries run as the read-only ClickHouse user "api" whose profile caps
-threads, memory and time; this process runs MAX_INFLIGHT queries at once, queues a burst for up to QUEUE_SECONDS, then 503s.
+Claim semantics are the extension's: every claim must match, a value starting with "^" is a prefix, the SAN claim
+matches any SAN. Queries run as the read-only ClickHouse user "api" (capped threads, memory, time); MAX_INFLIGHT
+queries at once, a burst queues up to QUEUE_SECONDS, then 503.
 """
-import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request  # base64: sigsum signer keys
+import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CH = "http://127.0.0.1:8123/?user=api&"
 SIGSUM_DB = "/srv/index/sigsum.db"
 MAX_INFLIGHT = 8
-QUEUE_SECONDS = 3  # a burst waits this long for a slot before getting a 503; queries cost ~100 ms, so a 9-wide burst never waits
+QUEUE_SECONDS = 3
 LIMIT, MAX_LIMIT = 500, 2000
 OID_RE = re.compile(r"^[0-9]+(\.[0-9]+)+$")
 SAN, ISSUER, ISSUER_V1 = "2.5.29.17", "1.3.6.1.4.1.57264.1.8", "1.3.6.1.4.1.57264.1.1"
-# Claims that pin down a signer, most selective first: one of them drives the identity range of the query, the rest
-# are checked on the certificate map inside that range. Driving from a low-selectivity claim (runner = github-hosted)
-# would pull millions of identities through the claims table.
+# Selective claims, most selective first: one drives the identity range through the claims table, the rest are checked
+# on the map inside that range. Driving from a broad claim (runner = github-hosted) would pull millions of identities.
 DRIVERS = ["1.3.6.1.4.1.57264.1.9", "1.3.6.1.4.1.57264.1.18", "1.3.6.1.4.1.57264.1.12", "1.3.6.1.4.1.57264.1.5",
            "1.3.6.1.4.1.57264.1.16", "1.3.6.1.4.1.57264.1.24", "1.3.6.1.4.1.57264.1.14", "1.3.6.1.4.1.57264.1.4"]
 inflight = threading.BoundedSemaphore(MAX_INFLIGHT)

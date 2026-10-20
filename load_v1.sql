@@ -1,22 +1,15 @@
--- Load one Rekor v1 Parquet file (rekor_v1_export.sh output) into webcat.entries.
--- Usage: clickhouse-client --param_file=rekor-v1/export/v1/part-000000000000.parquet --multiquery < load_v1.sql
--- Projects once into stage_v1 (Memory), then fans out to entries, entries_by_index, entries_by_time, claims and sha.
--- identity: one row per SAN URI and email (the extension accepts a claim matching any SAN); when the loader left the
--- SAN columns empty (most Fulcio certs before ~index 50M) the first GeneralName of the raw SAN if it is a URI or
--- email; else one row per PGP user id; else the key digest.
--- issuer: Fulcio OIDC issuer (1.8, else 1.1), else the certificate issuer DN, else the Go key type.
--- ext: every OID except the two issuer OIDs (moved to issuer), git SHAs 1.3/1.10/1.13/1.19, run ids 1.15/1.17,
--- run invocation URI 1.21 and the raw SAN. Those are per-entry noise for an index.
-SET max_threads = 1, input_format_parquet_use_native_reader = 1, input_format_parquet_max_block_size = 4096, max_insert_block_size = 65536, min_insert_block_size_rows = 65536;  -- 5.8 GB box
+-- One Rekor v1 export file -> stage_v1 -> entries, entries_by_index, entries_by_time, claims, sha, leaves_v1.
+-- Parameter: {file:String} path under the archive volume. Same identity/issuer/ext rules as load_v2.sql; the raw SAN
+-- (kept by the export where the dataset's SAN columns are empty) yields the identity when it is a URI or email.
+SET max_threads = 1, input_format_parquet_use_native_reader = 1, input_format_parquet_max_block_size = 4096, max_insert_block_size = 65536, min_insert_block_size_rows = 65536;
 
-CREATE OR REPLACE FUNCTION derLen AS (v, i) ->  -- (length, header bytes) of the DER TLV whose length byte is at 1-based offset i.
-  -- Lengths are clamped to the input size: every branch of a multiIf is evaluated on every row, so offsets computed
-  -- for the wrong shape must stay harmless (an unclamped garbage length made substring reserve gigabytes).
+-- (length, header bytes) of the DER TLV whose length byte is at offset i; lengths clamped to the input so that
+-- branches evaluated on rows of another shape stay harmless
+CREATE OR REPLACE FUNCTION derLen AS (v, i) ->
   if(reinterpretAsUInt8(substring(v, i, 1)) < 128,
      tuple(least(toUInt64(reinterpretAsUInt8(substring(v, i, 1))), length(v)), 1),
      tuple(least(reinterpretAsUInt64(reverse(substring(v, i + 1, least(reinterpretAsUInt8(substring(v, i, 1)) - 128, 8)))), length(v)), 1 + reinterpretAsUInt8(substring(v, i, 1)) - 128));
-CREATE OR REPLACE FUNCTION derText AS (v) ->  -- Fulcio OIDs >= 1.8 are DER UTF8String (0x0C len text); older ones are raw
-  if(substring(v, 1, 1) = '\x0C', substring(v, 2 + derLen(v, 2).2), v);
+CREATE OR REPLACE FUNCTION derText AS (v) -> if(substring(v, 1, 1) = '\x0C', substring(v, 2 + derLen(v, 2).2), v);
 
 TRUNCATE TABLE webcat.stage_v1;
 
@@ -26,15 +19,11 @@ SELECT
   toUInt64(LogIndex) AS log_index,
   toDateTime(IntegratedTime) AS time,
   ifNull(Kind, '') AS kind,
-  multiIf(
-    mapContains(m, '1.3.6.1.4.1.57264.1.8'), m['1.3.6.1.4.1.57264.1.8'],
-    mapContains(m, '1.3.6.1.4.1.57264.1.1'), m['1.3.6.1.4.1.57264.1.1'],
-    ifNull(Issuer, '') != '', Issuer,
-    ifNull(IdentityGoType, '')) AS issuer,
+  multiIf(mapContains(m, '1.3.6.1.4.1.57264.1.8'), m['1.3.6.1.4.1.57264.1.8'],
+          mapContains(m, '1.3.6.1.4.1.57264.1.1'), m['1.3.6.1.4.1.57264.1.1'],
+          ifNull(Issuer, '') != '', Issuer, ifNull(IdentityGoType, '')) AS issuer,
   arrayJoin(multiIf(
     length(arrayConcat(SANExtensionURIs, SANExtensionEmailAddresses)) > 0, arrayConcat(SANExtensionURIs, SANExtensionEmailAddresses),
-    -- raw SAN fallback: the first GeneralName when it is a URI [6] or email [1]. Measured on the early log: 6 otherName-first
-    -- SANs in 510k; the otherName chain cost 1.5 GB per file in SQL, so v1 skips it (v2 handles otherName in Python).
     rawsan != '' AND substring(rawsan, 2 + derLen(rawsan, 2).2, 1) IN ('\x86', '\x81'),
       [substring(rawsan, 3 + derLen(rawsan, 2).2 + derLen(rawsan, 3 + derLen(rawsan, 2).2).2, derLen(rawsan, 3 + derLen(rawsan, 2).2).1)],
     length(PGPIdentities) > 0, PGPIdentities,
@@ -60,8 +49,7 @@ INSERT INTO webcat.entries_by_time SELECT time, log, log_index, kind, issuer, id
 INSERT INTO webcat.claims SELECT DISTINCT k, v, identity FROM webcat.stage_v1 ARRAY JOIN mapKeys(ext) AS k, mapValues(ext) AS v;
 
 INSERT INTO webcat.sha
-SELECT DISTINCT unhex(h) AS sha, 'rekor-v1' AS log, toUInt64(LogIndex) AS log_index
-FROM file({file:String}, Parquet)
+SELECT DISTINCT unhex(h), 'rekor-v1', toUInt64(LogIndex) FROM file({file:String}, Parquet)
 ARRAY JOIN arrayMap(x -> ifNull(x.2, ''), arrayFilter(x -> x.1 IN ('1.3.6.1.4.1.57264.1.3', '1.3.6.1.4.1.57264.1.13'), Extensions)) AS h
 WHERE LogIndex IS NOT NULL AND length(h) = 40 AND match(h, '^[0-9a-f]{40}$');
 

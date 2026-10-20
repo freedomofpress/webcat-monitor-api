@@ -1,29 +1,22 @@
-"""Rekor v2 (C2SP tlog-tiles): verify every entry bundle against its level-0 hash tile, extract each signer's
-certificate into an archive record (every claim-bearing field, same content as the v1 BigQuery export), write
-the records as one Parquet file per chunk under <archive>/rekor-v2/<name>/parsed/, load the index rows from
-that file with load_v2.sql, keep the hash tiles (32 bytes/entry, enough for the tree check) and drop the bundle.
-The index is a projection of the archive: rebuilding it is rerunning load_v2.sql over parsed/*.parquet.
-Set keep_bundles = true on a source to also keep the raw bundles zstd-compressed (~540 bytes/entry)."""
+"""Rekor v2 shards (C2SP tlog-tiles). Each bundle of 256 entries is verified against its level-0 hash tile, every
+signer certificate is extracted into an archive record (Parquet, one file per CHUNK bundles), the records are loaded
+by load_v2.sql, the hash tiles are kept for the tree check and the bundle is dropped. Tile roots are checked against
+the signed checkpoint every run. The index is a projection of the archive."""
 import base64, hashlib, json, logging, pathlib, struct, time
 from concurrent.futures import ThreadPoolExecutor
 from util import get, ch, record_status
 from verify import merkle_root, verify_checkpoint
 
-WIDTH = 256
-WORKERS = 32
-CHUNK = 500    # bundles per archive file + insert; 128k rows keeps ClickHouse under ~1 GB while v1 files load alongside
-ZSTD_LEVEL = 9
-FULCIO = "1.3.6.1.4.1.57264."
-DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT and authority info access; plus every 2.5.29.* (SAN is read separately)
-ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, "
-                   "san_uris Array(String), san_emails Array(String), san_other Array(String), key_details String, key_digest String, key_raw String, "
+WIDTH, CHUNK, WORKERS, ZSTD_LEVEL = 256, 500, 32, 9
+DROP = {"1.3.6.1.4.1.11129.2.4.2", "1.3.6.1.5.5.7.1.1"}  # SCT, AIA; every 2.5.29.* is dropped too, the SAN is read separately
+ARCHIVE_COLUMNS = ("log_index UInt64, time DateTime, kind String, issuer_dn String, not_before DateTime, san_uris Array(String), "
+                   "san_emails Array(String), san_other Array(String), key_details String, key_digest String, key_raw String, "
                    "artifact_digest String, ext Map(String, String)")
 LOAD_SQL = [q for q in pathlib.Path(__file__).with_name("load_v2.sql").read_text().split(";\n") if any(l.strip() and not l.strip().startswith("--") for l in q.split("\n"))]
 
 def tile_path(n):
-    """tlog-tiles path element: 1234067 -> x001/x234/067, 5 -> 005."""
-    s = f"{n:03d}"
-    s = "0" * (-len(s) % 3) + s
+    """1234067 -> x001/x234/067"""
+    s = f"{n:03d}"; s = "0" * (-len(s) % 3) + s
     parts = [s[i:i + 3] for i in range(0, len(s), 3)]
     return "/".join(["x" + p for p in parts[:-1]] + [parts[-1]])
 
@@ -31,13 +24,12 @@ def split_bundle(bundle):
     off, out = 0, []
     while off < len(bundle):
         (n,) = struct.unpack(">H", bundle[off:off + 2])
-        out.append(bundle[off + 2:off + 2 + n])
-        off += 2 + n
+        out.append(bundle[off + 2:off + 2 + n]); off += 2 + n
     if off != len(bundle): raise ValueError("trailing bytes in bundle")
     return out
 
 def der_text(b):
-    """Fulcio OIDs >= 1.8 are DER UTF8String; older ones and custom OIDs may be raw."""
+    """DER UTF8String -> text; anything else as-is (Fulcio OIDs below 1.8 and custom OIDs are raw)."""
     if b[:1] == b"\x0c" and len(b) >= 2:
         n, i = b[1], 2
         if n >= 0x80: k = n - 0x80; n = int.from_bytes(b[2:2 + k], "big"); i = 2 + k
@@ -45,34 +37,30 @@ def der_text(b):
     return b.decode("utf-8", "replace")
 
 def verifiers(entry):
-    """Yield (kind, verifier dict, artifact digest hex) for every signer in a v2 entry body."""
+    """(kind, verifier, artifact digest hex) per signer of a v2 entry."""
     kind, spec = entry["kind"], entry["spec"]
     if kind == "hashedrekord":
-        h = spec["hashedRekordV002"]
-        yield kind, h["signature"]["verifier"], base64.b64decode(h["data"]["digest"]).hex()
+        h = spec["hashedRekordV002"]; yield kind, h["signature"]["verifier"], base64.b64decode(h["data"]["digest"]).hex()
     elif kind == "dsse":
         d = spec["dsseV002"]
         for s in d["signatures"]: yield kind, s["verifier"], base64.b64decode(d["payloadHash"]["digest"]).hex()
     else: raise ValueError(f"unknown v2 kind {kind}")
 
 def record(index, now, kind, v, digest):
-    """Archive record for one signer: everything a claim could match on, the artifact digest, and the raw key for
-    key-based signers. time is our fetch time: a v2 leaf carries no timestamp; the index uses not_before instead."""
-    from cryptography import x509  # lazy: the offline tests import this module without it
-    r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00",
-         "san_uris": [], "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "",
-         "key_raw": "", "artifact_digest": digest, "ext": {}}
+    """Archive record for one signer. `time` is the fetch time: a v2 leaf carries none, the index uses not_before."""
+    from cryptography import x509
+    r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00", "san_uris": [],
+         "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "", "key_raw": "", "artifact_digest": digest, "ext": {}}
     if "x509Certificate" in v:
         cert = x509.load_der_x509_certificate(base64.b64decode(v["x509Certificate"]["rawBytes"]))
-        r["issuer_dn"] = cert.issuer.rfc4514_string()
-        r["not_before"] = cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S")
+        r["issuer_dn"], r["not_before"] = cert.issuer.rfc4514_string(), cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S")
         for e in cert.extensions:
             oid = e.oid.dotted_string
             if oid == "2.5.29.17":
                 r["san_uris"] = e.value.get_values_for_type(x509.UniformResourceIdentifier)
                 r["san_emails"] = e.value.get_values_for_type(x509.RFC822Name)
-                r["san_other"] = [der_text(o.value) for o in e.value.get_values_for_type(x509.OtherName)]  # Fulcio username identities (1.3.6.1.4.1.57264.1.7)
-            elif oid not in DROP and not oid.startswith("2.5.29."):  # standard X.509 extensions carry no claims
+                r["san_other"] = [der_text(o.value) for o in e.value.get_values_for_type(x509.OtherName)]
+            elif oid not in DROP and not oid.startswith("2.5.29."):
                 r["ext"][oid] = der_text(e.value.value if isinstance(e.value, x509.UnrecognizedExtension) else e.value.public_bytes())
     elif v.get("publicKey", {}).get("rawBytes"):
         r["key_raw"] = v["publicKey"]["rawBytes"]
@@ -80,8 +68,7 @@ def record(index, now, kind, v, digest):
     return r
 
 def process_bundle(name, url, root, n, now, keep, force=False):
-    """Fetch (or read) bundle n, verify every entry against its level-0 hash tile, return (subtree root, archive rows).
-    force=True ignores a stored bundle and refetches, for archive rewrites."""
+    """Bundle n (stored or fetched; force refetches) verified against its hash tile -> (subtree root, archive rows)."""
     import zstandard
     p = tile_path(n)
     bdst, hdst = root / "tile" / "entries" / (p + ".zst"), root / "tile" / "0" / p
@@ -92,10 +79,8 @@ def process_bundle(name, url, root, n, now, keep, force=False):
     if len(entries) != WIDTH: raise RuntimeError(f"{name}: bundle {n} has {len(entries)} entries")
     rows = []
     for k, e in enumerate(entries):
-        if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]:
-            raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
-        entry = json.loads(e)
-        rows += [record(n * WIDTH + k, now, kind, v, digest) for kind, v, digest in verifiers(entry)]
+        if hashlib.sha256(b"\x00" + e).digest() != hashes[32 * k:32 * k + 32]: raise RuntimeError(f"{name}: bundle {n} entry {k} does not match its hash tile")
+        rows += [record(n * WIDTH + k, now, kind, v, digest) for kind, v, digest in verifiers(json.loads(e))]
     hdst.parent.mkdir(parents=True, exist_ok=True)
     if not hdst.exists(): hdst.write_bytes(hashes); hdst.chmod(0o444)
     if keep and not bdst.exists():
@@ -104,31 +89,25 @@ def process_bundle(name, url, root, n, now, keep, force=False):
     elif not keep and bdst.exists(): bdst.unlink()
     return merkle_root([hashes[i:i + 32] for i in range(0, 32 * WIDTH, 32)]), rows
 
-def write_archive(name, archive, rows):
-    """Write one chunk's rows as a Parquet file through ClickHouse (relative to its user_files_path)."""
-    body = "\n".join(json.dumps(r) for r in rows)
-    ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') "
-       "SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", body.encode())
+def write_archive(archive, rows):
+    ch(f"INSERT INTO FUNCTION file('{archive}', 'Parquet', '{ARCHIVE_COLUMNS}') SETTINGS engine_file_truncate_on_insert = 1, "
+       "output_format_parquet_compression_method = 'zstd' FORMAT JSONEachRow", "\n".join(json.dumps(r) for r in rows).encode())
 
 def rewrite_archive(src, paths, until):
-    """Refetch bundles [0, until) and rewrite their archive chunks with the current record schema. Index rows are not
-    touched: run reproject_v2.sh afterwards. Chunk boundaries follow CHUNK; files are replaced atomically."""
+    """Refetch bundles [0, until) and rewrite their archive chunks (record schema change); then build.py reproject."""
     name, url = src["name"], src["url"].rstrip("/")
     root = paths["archive"] / "rekor-v2" / name
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    done_file = root / "rewrite.done"
-    done = set(done_file.read_text().split()) if done_file.exists() else set()
+    done_file = root / "rewrite.done"; done = set(done_file.read_text().split()) if done_file.exists() else set()
     with ThreadPoolExecutor(WORKERS) as ex:
         for start in range(0, until, CHUNK):
             if str(start) in done: continue
-            end = min(start + CHUNK, until)
-            results = list(ex.map(lambda n: process_bundle(name, url, root, n, now, False, force=True), range(start, end)))
-            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"
-            apath = paths["archive"] / archive
+            results = list(ex.map(lambda n: process_bundle(name, url, root, n, now, False, force=True), range(start, min(start + CHUNK, until))))
+            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"; apath = paths["archive"] / archive
             if apath.exists(): apath.chmod(0o644)
-            write_archive(name, archive, [r for _, rows in results for r in rows]); apath.chmod(0o444)
+            write_archive(archive, [r for _, rows in results for r in rows]); apath.chmod(0o444)
             with done_file.open("a") as f: f.write(f"{start}\n")
-            logging.info("%s: rewrote archive chunk %d-%d", name, start, end)
+            logging.info("%s: rewrote archive chunk %d", name, start)
 
 def fetch(src, paths):
     name, url, keep = src["name"], src["url"].rstrip("/"), src.get("keep_bundles", False)
@@ -136,54 +115,43 @@ def fetch(src, paths):
     (root / "parsed").mkdir(parents=True, exist_ok=True)
     cp = get(url + "/checkpoint").decode()
     origin, size, root_hash = cp.split("\n")[0], int(cp.split("\n")[1]), base64.b64decode(cp.split("\n")[2])
-    cosigs = verify_checkpoint(cp, src.get("origin", url.split("://")[1]), base64.b64decode(src["key"]))  # raises on a bad log signature
+    cosigs = verify_checkpoint(cp, src.get("origin", url.split("://")[1]), base64.b64decode(src["key"]))
     full, tail = divmod(size, WIDTH)
     tail_hashes = get(f"{url}/tile/0/{tile_path(full)}.p/{tail}") if tail else b""
     if len(tail_hashes) != 32 * tail: raise RuntimeError(f"{name}: partial tile has {len(tail_hashes) // 32} hashes, want {tail}")
 
-    roots_file = root / "tile_roots.bin"   # 32 bytes per full tile: subtree root, makes the checkpoint check take seconds
-    state_file = root / "state.json"
+    roots_file, state_file = root / "tile_roots.bin", root / "state.json"   # roots: 32 bytes per full tile
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
-    parsed = state.get("parsed", 0)         # bundles whose rows are in ClickHouse
+    parsed = state.get("parsed", 0)
     have_roots = roots_file.stat().st_size // 32 if roots_file.exists() else 0
-    # A crash between a chunk's inserts and its state write would duplicate that chunk on resume. The state carries a
-    # dirty flag across that window; only then is the (expensive, full-table) cleanup delete run.
-    if state.get("dirty"):
-        for t in ("entries", "sha"):  # claims has no log_index and dedups on merge
-            ch(f"DELETE FROM webcat.{t} WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")
+    if state.get("dirty"):  # crashed between a chunk's inserts and its state write: drop what that chunk may have inserted
+        for t in ("entries", "entries_by_index", "entries_by_time"): ch(f"DELETE FROM webcat.{t} WHERE log = '{name}' AND log_index >= {parsed * WIDTH}")
         state["dirty"] = False; state_file.write_text(json.dumps(state))
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    save = lambda **kw: (state.update(kw), state_file.write_text(json.dumps(state)))
 
     with ThreadPoolExecutor(WORKERS) as ex, roots_file.open("r+b" if roots_file.exists() else "wb") as rf:
         for start in range(parsed, full, CHUNK):
             end = min(start + CHUNK, full)
-            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"   # relative to ClickHouse user_files_path = the archive volume
-            apath = paths["archive"] / archive
-            # Invariant: a read-only archive file is complete and already loaded. It is never rewritten; a resume only
-            # re-projects it into the index. A writable one is a leftover from a crash mid-write and is replaced.
-            if apath.exists() and not (apath.stat().st_mode & 0o200) and have_roots >= end:
-                state["dirty"] = True; state_file.write_text(json.dumps(state))
+            archive = f"rekor-v2/{name}/parsed/{start:09d}.parquet"; apath = paths["archive"] / archive
+            if apath.exists() and not (apath.stat().st_mode & 0o200) and have_roots >= end:  # read-only = complete: reuse
+                save(dirty=True)
                 for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
-                state.update({"origin": origin, "parsed": end, "dirty": False}); state_file.write_text(json.dumps(state))
-                logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
+                save(origin=origin, parsed=end, dirty=False); logging.info("%s: %d/%d bundles, archive reused", name, end, full); continue
             results = list(ex.map(lambda n: process_bundle(name, url, root, n, now, keep), range(start, end)))
-            state["dirty"] = True; state_file.write_text(json.dumps(state))
-            write_archive(name, archive, [r for _, rows in results for r in rows])
+            save(dirty=True)
+            write_archive(archive, [r for _, rows in results for r in rows])
             for q in LOAD_SQL: ch(q, params={"log": name, "file": archive})
             apath.chmod(0o444)
-            state["dirty"] = False
             if end > have_roots:
-                rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush()
-                have_roots = end
-            state.update({"origin": origin, "parsed": end}); state_file.write_text(json.dumps(state))
+                rf.seek(32 * max(start, have_roots)); rf.write(b"".join(r for r, _ in results[max(start, have_roots) - start:])); rf.flush(); have_roots = end
+            save(origin=origin, parsed=end, dirty=False)
             logging.info("%s: %d/%d bundles parsed", name, end, full)
 
     roots = roots_file.read_bytes()
     nodes = [roots[i:i + 32] for i in range(0, 32 * full, 32)]
     if tail: nodes.append(merkle_root([tail_hashes[i:i + 32] for i in range(0, 32 * tail, 32)]))
-    if merkle_root(nodes) != root_hash:
-        raise RuntimeError(f"{name}: tile roots do not hash to the checkpoint root at size {size}")
-    (root / "checkpoint").write_text(cp)
-    state.update({"size": size, "bundles": full}); state_file.write_text(json.dumps(state))
+    if merkle_root(nodes) != root_hash: raise RuntimeError(f"{name}: tile roots do not hash to the checkpoint root at size {size}")
+    (root / "checkpoint").write_text(cp); save(size=size, bundles=full)
     record_status(name, {"size": size, "root": root_hash.hex(), "entries_hash_to_tiles": True, "tiles_hash_to_root": True, "log_signature": True, "cosignatures_verified": cosigs})
     logging.info("%s: size %d, %d full bundles, root verified, checkpoint signature OK", name, size, full)
