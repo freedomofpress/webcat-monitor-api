@@ -11,7 +11,7 @@ import quality, rekor_v1, rekor_v2, sigsum, verify
 
 def rekor_v1_daily(src, paths):
     rekor_v1.fetch(src, paths)          # the increment
-    verify.rekor_v1_leaves(src)         # Merkle frontiers extended over the new leaves, checked against the signed heads
+    verify.rekor_v1_leaves(src, paths)  # Merkle frontiers extended over the new leaves, checked against the signed heads; gaps filled from the log
     quality.sample(src)                 # random live entries compared with the index
     quality.repair(src, paths)          # identities the dataset lacks, fetched from the live log
 

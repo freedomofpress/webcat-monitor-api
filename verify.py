@@ -143,29 +143,38 @@ def leaf_stream(from_index):
                 last = (idx, tid, h); yield last
             buf = buf[n * 48:]
 
-def rekor_v1_leaves(src):
+def rekor_v1_leaves(src, paths, max_gap=10000):
+    """Entries the dataset lacks are fetched from the live log and added to their export file as they are met, up to
+    max_gap consecutive indices; a larger hole is reported and stops the check at the last good index."""
+    import quality
     url = src["url"].rstrip("/")
     state = json.loads(FRONTIER.read_text()) if FRONTIER.exists() else {"next_index": 0, "order": [], "shards": {}}
     shards = {k: Frontier.load(v) for k, v in state["shards"].items()}
     order, n = state["order"], state["next_index"]
-    gap = {}
-    for idx, tid, h in leaf_stream(n):
-        if idx != n:
-            logging.error("rekor-v1: gap in the leaf list: expected %d, found %d; verified up to %d", n, idx, n - 1)
-            MISSING.write_text(json.dumps(list(range(n, min(idx, n + 100000)))))
-            gap = {"gap_at": n, "gap_to": idx}
+    gap, filled = {}, 0
+    while True:
+        gap_to = None
+        for idx, tid, h in leaf_stream(n):
+            if idx != n: gap_to = idx; break
+            t = tid.hex()
+            if t not in shards: shards[t] = Frontier(); order.append(t)
+            elif t != order[-1]: raise RuntimeError(f"rekor-v1: index {idx} in shard {t} after shard {order[-1]} ended")
+            shards[t].append(h); n += 1
+            if n % 100_000_000 == 0: logging.info("rekor-v1: hashed up to index %d", n)
+        FRONTIER.write_text(json.dumps({"next_index": n, "order": order, "shards": {k: v.state() for k, v in shards.items()}}))
+        if gap_to is None: break
+        missing = list(range(n, gap_to))
+        if len(missing) > max_gap or not quality.fill_missing(src, paths, missing):
+            logging.error("rekor-v1: %d entries missing from the dataset at %d..%d could not be filled; verified up to %d", len(missing), n, gap_to - 1, n - 1)
+            MISSING.write_text(json.dumps(missing[:100000])); gap = {"gap_at": n, "gap_to": gap_to}
             break
-        t = tid.hex()
-        if t not in shards: shards[t] = Frontier(); order.append(t)
-        elif t != order[-1]: raise RuntimeError(f"rekor-v1: index {idx} in shard {t} after shard {order[-1]} ended")
-        shards[t].append(h); n += 1
-        if n % 100_000_000 == 0: logging.info("rekor-v1: hashed up to index %d", n)
-    FRONTIER.write_text(json.dumps({"next_index": n, "order": order, "shards": {k: v.state() for k, v in shards.items()}, **gap}))
+        filled += len(missing)
+        logging.info("rekor-v1: %d entries missing from the dataset at %d..%d fetched from the log and archived", len(missing), n, gap_to - 1)
     info = json.loads(get(url + "/api/v1/log").decode())
     heads = {}
     for sth in [info["signedTreeHead"]] + [s["signedTreeHead"] for s in info["inactiveShards"]]:
         tid, size, root = verify_rekor_v1_sth(sth, src["key_pem"]); heads[int(tid)] = (size, root)
-    result = {"leaves_hashed": n, "log_signatures": True, "shards": {}, **gap}
+    result = {"leaves_hashed": n, "filled_from_log": filled, "log_signatures": True, "shards": {}, **gap}
     for t in order:
         f, tid = shards[t], int(t, 16); size, root = heads[tid]
         if f.size == size:
@@ -187,4 +196,5 @@ if __name__ == "__main__":
     import tomllib
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = tomllib.loads(pathlib.Path(__file__).with_name("sources.toml").read_text())
-    rekor_v1_leaves(next(s for s in cfg["source"] if s["type"] == "rekor-v1"))
+    paths = {k: pathlib.Path(v) for k, v in cfg["paths"].items()}
+    rekor_v1_leaves(next(s for s in cfg["source"] if s["type"] == "rekor-v1"), paths)

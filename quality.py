@@ -16,7 +16,8 @@ BUDGET = 60000              # entries per nightly repair run; the bootstrap back
 WORKERS, RATE = 2, 2.0      # Rekor answers 429/503 above a few requests per second
 NO_CERT_KINDS = ("rfc3161", "tuf")
 RANGES = pathlib.Path("/srv/index/v1_file_ranges.json")
-LOCK = "/run/lock/webcat-repair.lock"
+LOCK = "/run/lock/webcat-repair.lock"           # one repair run at a time (nightly vs backlog)
+FILE_LOCK = "/run/lock/webcat-archive.lock"     # one export-file rewrite at a time (repair vs gap fill)
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # as the export
 STRUCT = ("LogIndex Nullable(Int64), IntegratedTime Nullable(DateTime64(6, 'UTC')), Kind Nullable(String), EntryUUID Nullable(String), "
           "IdentityGoType Nullable(String), ID Nullable(String), Issuer Nullable(String), NotBefore Nullable(DateTime64(6, 'UTC')), "
@@ -142,7 +143,12 @@ def replace_index_rows(indices):
 
 def repair_file(url, paths, rel, idxs, missing=()):
     """Replace the placeholder rows of one export file, and add rows for `missing` indices the dataset never had.
-    Returns (entries fetched, entries given an identity)."""
+    Returns (entries fetched, entries given an identity). Serialized per file across callers."""
+    with open(FILE_LOCK, "w") as fl:
+        fcntl.flock(fl, fcntl.LOCK_EX)
+        return _repair_file(url, paths, rel, idxs, missing)
+
+def _repair_file(url, paths, rel, idxs, missing):
     present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()] if idxs else []
     absent = [i for i in missing if not ch(f"SELECT 1 FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex = {i} LIMIT 1 FORMAT TSV").strip()]
     present = present + absent
@@ -172,6 +178,14 @@ def repair_file(url, paths, rel, idxs, missing=()):
     subprocess.run(["clickhouse-client", f"--param_file={repl}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
     (a / repl).unlink()
     return len(present), sum(1 for _, ok in rows if ok)
+
+def fill_missing(src, paths, indices):
+    """Add entries the dataset never had (reported by the leaf-list check) to their export files. Returns how many were added."""
+    url, added = src["url"].rstrip("/"), 0
+    for rel, (lo, hi) in sorted(file_ranges(paths).items(), key=lambda kv: kv[1][0]):
+        gaps = [i for i in indices if lo <= i <= hi]
+        if gaps: added += repair_file(url, paths, rel, [], gaps)[0]
+    return added
 
 def repair(src, paths, budget=BUDGET):
     lock = open(LOCK, "w")
