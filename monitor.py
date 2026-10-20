@@ -7,13 +7,9 @@ Each [[source]] in the config has a `type`; FETCHERS maps a type to one function
 local copy up to date and verifies it. New instance = config block. New log type = one function here.
 """
 import argparse, logging, pathlib, sys, tomllib
-import rekor_v2, sigsum
+import rekor_v1, rekor_v2, sigsum
 
-def rekor_v1(src, paths):
-    # ponytail: v1 has no bulk read API. History comes from the BigQuery export, the tail from APPENDS. Not wired yet.
-    logging.warning("%s: rekor v1 fetch not implemented, skipping", src["name"])
-
-FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1}
+FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1.fetch}
 
 def main():
     ap = argparse.ArgumentParser()

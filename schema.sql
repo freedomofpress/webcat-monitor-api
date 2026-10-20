@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS webcat.artifact (
 
 -- Staging for one v2 chunk: projected once, fanned out to entries, entries_by_index and entries_by_time.
 CREATE TABLE IF NOT EXISTS webcat.stage_v2 AS webcat.entries ENGINE = Memory;
+CREATE TABLE IF NOT EXISTS webcat.stage_v1 AS webcat.entries ENGINE = Memory;
 
 -- Per-log totals for the API's status endpoint, refreshed at the end of each monitor run (a count over 3.4B rows
 -- takes seconds, too slow and too heavy for a public endpoint).

@@ -1,6 +1,6 @@
 -- Load one Rekor v1 Parquet file (rekor_v1_export.sh output) into webcat.entries.
 -- Usage: clickhouse-client --param_file=rekor-v1/export/v1/part-000000000000.parquet --multiquery < load_v1.sql
--- v1_ingest.sh points the INSERT at a staging table and attaches its parts afterwards, so a failed file leaves no rows behind.
+-- Projects once into stage_v1 (Memory), then fans out to entries, entries_by_index, entries_by_time, claims and sha.
 -- identity: one row per SAN URI and email (the extension accepts a claim matching any SAN); when the loader left the
 -- SAN columns empty (most Fulcio certs before ~index 50M) the first GeneralName of the raw SAN if it is a URI or
 -- email; else one row per PGP user id; else the key digest.
@@ -18,7 +18,9 @@ CREATE OR REPLACE FUNCTION derLen AS (v, i) ->  -- (length, header bytes) of the
 CREATE OR REPLACE FUNCTION derText AS (v) ->  -- Fulcio OIDs >= 1.8 are DER UTF8String (0x0C len text); older ones are raw
   if(substring(v, 1, 1) = '\x0C', substring(v, 2 + derLen(v, 2).2), v);
 
-INSERT INTO webcat.entries
+TRUNCATE TABLE webcat.stage_v1;
+
+INSERT INTO webcat.stage_v1
 SELECT
   'rekor-v1' AS log,
   toUInt64(LogIndex) AS log_index,
@@ -48,3 +50,17 @@ FROM (
   FROM file({file:String}, Parquet)
 )
 WHERE LogIndex IS NOT NULL;
+
+INSERT INTO webcat.entries SELECT * FROM webcat.stage_v1;
+
+INSERT INTO webcat.entries_by_index SELECT * FROM webcat.stage_v1;
+
+INSERT INTO webcat.entries_by_time SELECT time, log, log_index, kind, issuer, identity FROM webcat.stage_v1;
+
+INSERT INTO webcat.claims SELECT DISTINCT k, v, identity FROM webcat.stage_v1 ARRAY JOIN mapKeys(ext) AS k, mapValues(ext) AS v;
+
+INSERT INTO webcat.sha
+SELECT DISTINCT unhex(h) AS sha, 'rekor-v1' AS log, toUInt64(LogIndex) AS log_index
+FROM file({file:String}, Parquet)
+ARRAY JOIN arrayMap(x -> ifNull(x.2, ''), arrayFilter(x -> x.1 IN ('1.3.6.1.4.1.57264.1.3', '1.3.6.1.4.1.57264.1.13'), Extensions)) AS h
+WHERE LogIndex IS NOT NULL AND length(h) = 40 AND match(h, '^[0-9a-f]{40}$');
