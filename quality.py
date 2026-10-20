@@ -154,6 +154,8 @@ def repair_file(url, paths, rel, idxs):
     ch("TRUNCATE TABLE webcat.stage_repair")
     ch("INSERT INTO webcat.stage_repair FORMAT JSONEachRow", "\n".join(json.dumps(r) for r, _ in rows).encode())
     repl, tmp, ids = "rekor-v1/repair.tmp.parquet", rel + ".tmp", ",".join(map(str, present))
+    a = paths["archive"]; d = (a / rel).parent
+    os.chmod(d, 0o755)  # archive directories are read-only between repairs; the temp file is written next to the original
     ch(f"INSERT INTO FUNCTION file({repl!r}, 'Parquet', {STRUCT!r}) SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' "
        "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
        "arrayMap(x -> (x.1, unhex(x.2), x.3), ExtHex), SANExtensionURIs, SANExtensionEmailAddresses, [], [] FROM webcat.stage_repair")
@@ -162,8 +164,7 @@ def repair_file(url, paths, rel, idxs):
        f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN ({ids}) AND {PLACEHOLDER}) UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
     old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) FORMAT TSV").strip()) for f in (rel, tmp))
     if old != new: raise RuntimeError(f"{rel}: row count changed {old} -> {new}, not replacing")
-    a = paths["archive"]
-    os.chmod(a / rel, 0o644); os.chmod((a / rel).parent, 0o755); os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444)
+    os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444); os.chmod(d, 0o555)
     replace_index_rows(present)
     subprocess.run(["clickhouse-client", f"--param_file={repl}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
     (a / repl).unlink()
