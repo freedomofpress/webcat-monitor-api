@@ -2,7 +2,9 @@
 """webcat log auditor API: read-only JSON over HTTP in front of the ClickHouse index and the Sigsum SQLite index.
 
   GET /v1/status
-  GET /v1/sigstore/history?claims=<urlsafe base64 of the enrollment's claims JSON>[&limit=N][&before=<unix time>]
+  GET /v1/sigstore/history?claims[<oid>]=<value>&claims[<oid>]=<value>...[&limit=N][&before=<unix time>]
+      (OpenAPI deepObject style; values URL-encoded as usual)
+  POST /v1/sigstore/history   body: {"claims": {<oid>: <value>, ...}, "limit": N, "before": <unix time>}
   GET /v1/sigsum/history?key=<hex sha256 of the signer public key>  |  ?signer=<base64url public key>
   GET /v1/entry/<log>/<log index>
   GET /v1/sha/<40 hex>          git commit SHA -> entries
@@ -12,7 +14,7 @@ Claim semantics are the extension's ClaimPolicy: every claim must match; a value
 the SAN claim (2.5.29.17) matches any SAN. Queries run as the read-only ClickHouse user "api" whose profile caps
 threads, memory and time; this process allows MAX_INFLIGHT queries at once and answers 503 beyond that.
 """
-import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request
+import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request  # base64: sigsum signer keys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CH = "http://127.0.0.1:8123/?user=api&"
@@ -69,8 +71,10 @@ def with_links(rows):
         if r["log"] == "rekor-v1": r["search_url"] = f"https://search.sigstore.dev/?logIndex={r['log_index']}"
     return rows
 
-def route(path, qs):
+def route(path, qs, body=None):
     q = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
+    if body:
+        q.update({k: v for k, v in body.items() if k in ("limit", "before")})
     limit = min(int(q.get("limit", LIMIT)), MAX_LIMIT)
     parts = path.strip("/").split("/")
     if parts == ["v1", "status"]:
@@ -79,8 +83,8 @@ def route(path, qs):
         return {"rekor": [{**r, "url": SOURCES.get(r["log"], {}).get("url")} for r in logs],
                 "sigsum": [{"log": l, "url": SOURCES.get(l, {}).get("url"), "size": s, "fetched_at": t} for l, s, t in sigsum]}
     if parts == ["v1", "sigstore", "history"]:
-        try: claims = json.loads(base64.urlsafe_b64decode(q["claims"] + "=" * (-len(q["claims"]) % 4)))
-        except Exception: raise Bad(400, "claims must be urlsafe base64 of a JSON object")
+        claims = body.get("claims") if body else {m.group(1): v[0] for k, v in urllib.parse.parse_qs(qs).items() if (m := re.match(r"^claims\[([0-9.]+)\]$", k))}
+        if not claims: raise Bad(400, "no claims: pass claims[<oid>]=<value> query parameters, or POST {\"claims\": {...}}")
         rows = with_links(ch(history_sql(claims, limit, q.get("before"))))
         return {"claims": claims, "total": len(rows), "truncated": len(rows) == limit, "entries": rows}
     if parts == ["v1", "sigsum", "history"]:
@@ -102,12 +106,17 @@ def route(path, qs):
 class Handler(BaseHTTPRequestHandler):
     server_version = "webcat-auditor/0.1"
     def log_message(self, fmt, *args): pass
-    def do_GET(self):
+    def do_GET(self): self.handle_request(None)
+    def do_POST(self):
+        try: body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 65536)) or b"{}")
+        except Exception: return self.reply(400, {"error": "body must be JSON"})
+        self.handle_request(body if isinstance(body, dict) else {})
+    def handle_request(self, body):
         u = urllib.parse.urlsplit(self.path)
         if not inflight.acquire(blocking=False):
             return self.reply(503, {"error": "busy, retry shortly"}, retry=2)
         try:
-            self.reply(200, route(u.path, u.query))
+            self.reply(200, route(u.path, u.query, body))
         except Bad as e: self.reply(e.status, {"error": e.msg}, retry=2 if e.status == 503 else None)
         except Exception as e: self.reply(500, {"error": type(e).__name__})
         finally: inflight.release()
