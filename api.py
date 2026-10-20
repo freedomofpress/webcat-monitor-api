@@ -12,7 +12,7 @@
 
 Claim semantics are the extension's ClaimPolicy: every claim must match; a value starting with "^" is a prefix;
 the SAN claim (2.5.29.17) matches any SAN. Queries run as the read-only ClickHouse user "api" whose profile caps
-threads, memory and time; this process allows MAX_INFLIGHT queries at once and answers 503 beyond that.
+threads, memory and time; this process runs MAX_INFLIGHT queries at once, queues a burst for up to QUEUE_SECONDS, then 503s.
 """
 import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request  # base64: sigsum signer keys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 CH = "http://127.0.0.1:8123/?user=api&"
 SIGSUM_DB = "/srv/index/sigsum.db"
 PORT = 8080
-MAX_INFLIGHT = 6
+MAX_INFLIGHT = 8
+QUEUE_SECONDS = 3  # a burst waits this long for a slot before getting a 503; queries cost ~100 ms, so a 9-wide burst never waits
 LIMIT, MAX_LIMIT = 500, 2000
 OID_RE = re.compile(r"^[0-9]+(\.[0-9]+)+$")
 SAN, ISSUER, ISSUER_V1 = "2.5.29.17", "1.3.6.1.4.1.57264.1.8", "1.3.6.1.4.1.57264.1.1"
@@ -113,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_request(body if isinstance(body, dict) else {})
     def handle_request(self, body):
         u = urllib.parse.urlsplit(self.path)
-        if not inflight.acquire(blocking=False):
+        if not inflight.acquire(timeout=QUEUE_SECONDS):
             return self.reply(503, {"error": "busy, retry shortly"}, retry=2)
         try:
             self.reply(200, route(u.path, u.query, body))
