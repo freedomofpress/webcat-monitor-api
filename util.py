@@ -18,6 +18,7 @@ def ch(query, data=None, params=None):
     """Local ClickHouse over HTTP. data: request body (INSERT ... FORMAT JSONEachRow); params: {name:Type} placeholders.
     Transient 5xx (memory, timeouts) are retried; syntax, unknown identifier and file errors are not."""
     q = {"query": query, **{"param_" + k: v for k, v in (params or {}).items()}}
+    if data is None and len(query) > 50000: data, q["query"] = query.encode(), ""  # long queries go in the body, not the URL
     for n in range(20):
         try:
             with urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8123/?" + urllib.parse.urlencode(q), data=data or None, method="POST"), timeout=600) as r:

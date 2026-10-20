@@ -164,6 +164,8 @@ def _repair_file(url, paths, rel, idxs, missing):
     ch("INSERT INTO webcat.stage_repair FORMAT JSONEachRow", "\n".join(json.dumps(r) for r, _ in rows).encode())
     repl, tmp, ids = "rekor-v1/repair.tmp.parquet", rel + ".tmp", ",".join(map(str, present))
     a = paths["archive"]; d = (a / rel).parent
+    for stale in (a / repl, a / tmp):
+        if stale.exists(): stale.unlink()  # a leftover from a failed run would be appended to, not replaced
     os.chmod(d, 0o755)  # archive directories are read-only between repairs; the temp file is written next to the original
     ch(f"INSERT INTO FUNCTION file({repl!r}, 'Parquet', {STRUCT!r}) SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' "
        "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
