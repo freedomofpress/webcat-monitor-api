@@ -25,6 +25,11 @@ def fetch_entry(url, idx):
 
 def run(src, paths, budget=BUDGET):
     from concurrent.futures import ThreadPoolExecutor
+    import fcntl
+    lock = open("/run/lock/webcat-repair.lock", "w")
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logging.info("rekor-v1 repair: another repair run holds the queue, skipping"); return
     url = src["url"].rstrip("/")
     root = paths["archive"] / "rekor-v1" / "repaired"; root.mkdir(parents=True, exist_ok=True)
     q = f"SELECT DISTINCT log_index, toUnixTimestamp(time) FROM webcat.entries WHERE identity = '' AND log = 'rekor-v1' AND issuer = '' AND kind NOT IN {NO_CERT_KINDS} ORDER BY log_index LIMIT {budget} FORMAT TSV"
