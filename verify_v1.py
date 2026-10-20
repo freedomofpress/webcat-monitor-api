@@ -34,13 +34,13 @@ def run(src):
     shards = {k: Frontier.load(v) for k, v in state["shards"].items()}
     order = state.get("order", [])
     n, start = state["next_index"], state["next_index"]
+    state_extra, missing = {}, []
     for idx, tid, h in stream(start):
         if idx != n:
             logging.error("rekor-v1: gap in leaf list: next expected %d, found %d; verified up to %d", n, idx, n - 1)
             missing = list(range(n, min(idx, n + 100000)))  # recorded for the repair: these entries are absent from the dataset
-            state_extra = {"gap_at": n, "gap_to": idx}; break
-    else:
-        state_extra = {}; missing = []
+            state_extra = {"gap_at": n, "gap_to": idx}
+            break
         t = tid.hex()
         if t not in shards: shards[t] = Frontier(); order.append(t)
         elif t != order[-1]: raise RuntimeError(f"rekor-v1: index {idx} belongs to shard {t} after shard {order[-1]} already ended")
