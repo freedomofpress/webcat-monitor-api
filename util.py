@@ -26,7 +26,9 @@ def ch(query, data=None, params=None):
             with urllib.request.urlopen(req, timeout=600) as r:
                 return r.read().decode()
         except urllib.error.HTTPError as e:
-            if e.code < 500 or n == 19: raise
+            body = e.read().decode(errors="replace")[:400]
+            if e.code < 500 or n == 19 or "Code: 62" in body or "Code: 47" in body or "Code: 76" in body:  # syntax, unknown identifier, cannot open: not transient
+                raise RuntimeError(f"clickhouse {e.code}: {body}") from None
             time.sleep(30)
 
 
