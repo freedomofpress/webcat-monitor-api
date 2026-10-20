@@ -1,77 +1,75 @@
 # webcat-monitor
 
-Mirrors, verifies and indexes the transparency logs WEBCAT trusts, and serves a read-only API over the index.
-Used by `webcat audit` and explore.webcat.tech. See STATUS.md for sizes, latencies and the API examples.
+The log auditor for [WEBCAT](https://github.com/freedomofpress/webcat). It mirrors the transparency logs WEBCAT
+trusts (Sigsum logs, Rekor v1 and v2), verifies them, indexes every signer identity and claim, and serves the result
+as a small read-only API. `webcat audit` in the [CLI](https://github.com/freedomofpress/webcat-cli) and the
+[explorer](https://github.com/freedomofpress/webcat-explorer) use it to show the full signing history of an enrolled
+site, which neither Rekor's search nor Sigsum offer by themselves.
 
-## Architecture
+Current sizes, latencies and endpoint examples are in [STATUS.md](STATUS.md).
 
-```
- Sigsum logs ──get-tree-head/get-leaves──▶ sigsum.py ──▶ /srv/index/sigsum.db (leaves by signer key)
- Rekor v2 shards ──tlog-tiles──▶ rekor_v2.py ──▶ /srv/archive/rekor-v2/<shard>/{parsed/*.parquet, tile/0/*}
- Rekor v1 ──BigQuery dataset──▶ rekor_v1.py ──▶ /srv/archive/rekor-v1/{export,daily}/*.parquet
-                                                        │ load_v1.sql / load_v2.sql
-                                                        ▼
-            ClickHouse (/srv/index): entries · entries_by_index · entries_by_time · claims · sha · artifact · leaves_v1
-                                                        │
- verify.py (Merkle roots, proofs, signatures) ──▶ /srv/index/verification.json ──▶ api.py ──▶ clients
- quality.py (live sampling, in-place repair of the v1 dataset's gaps)
-```
+## What it answers
 
-- Archives are the source of truth: written once, read-only, in the data's own schema. The index is a projection
-  (`build.py reproject` rebuilds it; the loaders append to it daily).
-- Every signature is verified against a key pinned in `sources.toml`; every leaf set is rehashed to a signed root.
-- One unprivileged user (`clickhouse`) owns both volumes and runs everything; ClickHouse listens on localhost; the API
-  reads through a read-only user capped per query.
-
-## Instructions
-
-A Debian 13 box with two volumes mounted at `/srv/index` (NVMe) and `/srv/archive` (HDD):
+- Every Rekor entry whose certificate satisfies an enrollment's claims, with the extension's own matching rules
+  (all claims must match, `^` means prefix, the SAN claim matches any SAN).
+- Every Sigsum leaf signed by a given key, in the logs an enrollment names.
+- Entries by log index, by git commit, by artifact digest; status and verification results per log.
 
 ```
-LABEL=index   /srv/index   ext4 defaults,noatime,discard 0 2     # mkfs.ext4 -L index
-LABEL=archive /srv/archive ext4 defaults,noatime 0 2             # mkfs.ext4 -L archive -E nodiscard
+GET /v1/sigstore/history?claims[2.5.29.17]=^https://github.com/freedomofpress/&claims[1.3.6.1.4.1.57264.1.8]=https://token.actions.githubusercontent.com
+GET /v1/sigsum/history?signer=<base64url public key>
+GET /v1/entry/rekor-v1/3081692656   GET /v1/sha/<40 hex>   GET /v1/artifact/<64 hex>   GET /v1/status
 ```
 
-Then, as root, from a checkout:
+Answers are JSON. Claim queries are key-range lookups and take milliseconds on 3.4 billion rows.
+
+## Where the data comes from
+
+- **Sigsum logs**: `get-tree-head` and `get-leaves`, every leaf kept.
+- **Rekor v2**: the tlog-tiles endpoints. Every bundle is checked against its hash tile, every certificate is
+  extracted to an archive, the bundle is dropped.
+- **Rekor v1**: Google's public BigQuery dataset of the log. The v1 API serves one entry per request and the log
+  holds over three billion, so the history comes from a one-time export and daily `APPENDS` increments. The dataset
+  has no leaf bodies and some gaps; the live API is used to sample it daily and to fill what it lacks.
+
+Everything lands in two volumes: the archives on an HDD, written once and read-only, and a ClickHouse index on an
+NVMe that is a projection of them. The index can be rebuilt from the archives at any time.
+
+## What is verified, every day
+
+- Sigsum: leaves rehashed to the signed tree head; tree head signature and witness cosignatures.
+- Rekor v2: entries to hash tiles, tiles to the checkpoint, checkpoint signature.
+- Rekor v1: tree head signatures; the full leaf list per shard against the signed heads, with a consistency proof for
+  the active shard; 200 random live entries compared with the index.
+
+Keys are pinned in `sources.toml` and never fetched at runtime. What cannot be verified is the content of Rekor v1
+rows, because the dataset carries no leaf bodies; that is what the daily sampling is for.
+
+## Running it
+
+A Debian 13 box with an NVMe at `/srv/index` and an HDD at `/srv/archive`, and a Google service account with
+`bigquery.jobUser`, `bigquery.dataEditor` and `objectAdmin` on the bucket named in `sources.toml`. Then:
 
 ```
-./setup.sh --gcp-key service-account.json   # packages, ClickHouse, configs, schema, services; idempotent
-sudo -u clickhouse ./bootstrap.sh            # history from the endpoints: ~1 day, ~25 USD of BigQuery + egress
-   or:  ./snapshot.sh restore <source>       # the two volumes from a snapshot instead
+./setup.sh --gcp-key service-account.json   # packages, ClickHouse, config, schema, services
+sudo -u clickhouse ./bootstrap.sh            # the history from the endpoints: about a day, ~25 USD of BigQuery
 ```
 
-The Google service account needs `bigquery.jobUser`, `bigquery.dataEditor` and `objectAdmin` on the bucket in
-`sources.toml`. Nothing else is required: the Sigsum and Rekor endpoints are public.
+or, from an existing deployment, `./snapshot.sh make <dest>` there and `./snapshot.sh restore <src>` here instead of
+bootstrapping. After that a systemd timer runs `monitor.py` nightly. `python3 test.py` runs the offline checks.
 
-Daily: `webcat-monitor.timer` runs `monitor.py` at 03:24 UTC under one lock. Manual: `monitor.py <source> ...`.
-Check: `curl localhost:8080/v1/status`, `journalctl -u webcat-monitor`. Benchmarks: `./bench.sh`.
-Snapshot: `./snapshot.sh make user@host:/backups/webcat/` (stops ClickHouse for the copy).
-Tests: `python3 test.py` (stdlib only).
-
-## Files
+## Code
 
 | | |
 |---|---|
-| `sources.toml` | configuration: paths, GCP, API bind, logs with pinned keys, witness keys |
-| `schema.sql` | tables; `clickhouse.xml`, `clickhouse-users.xml` server and API user |
+| `sources.toml` | the configuration: volumes, GCP project, API bind, logs and their keys |
+| `monitor.py` | nightly entry point; `sigsum.py`, `rekor_v2.py`, `rekor_v1.py` fetch and load one log type each |
+| `verify.py` | Merkle trees and proofs, signed notes and checkpoints, Sigsum and Rekor tree heads |
+| `quality.py` | live sampling of Rekor v1, and the in-place repair of the dataset's gaps |
+| `build.py`, `load_v1.sql`, `load_v2.sql`, `schema.sql` | the index |
+| `api.py` | the API |
 | `setup.sh`, `bootstrap.sh`, `snapshot.sh` | lifecycle |
-| `monitor.py` | daily entry point; `sigsum.py`, `rekor_v2.py`, `rekor_v1.py` fetchers |
-| `verify.py` | Merkle frontier and consistency proofs; signed notes, checkpoints, Sigsum and Rekor v1 tree heads; v1 leaf list |
-| `quality.py` | `sample`: live entries vs the index; `repair`: fills what the v1 dataset lacks, in place |
-| `build.py` | derived tables (bootstrap), `reproject` after a projection change |
-| `load_v1.sql`, `load_v2.sql` | one archive file -> every table |
-| `api.py` + units | the API; `bench.sql`, `bench.sh`; `test.py` |
 
-## Verification
-
-Each daily run: Sigsum leaves to the signed root, tree head signature, witness cosignatures; Rekor v2 entries to hash
-tiles, tiles to the checkpoint, checkpoint signature; Rekor v1 tree head signatures, the leaf list per shard against
-the signed heads (consistency proof for the active shard, entries the dataset lacks fetched from the log), 200 random
-live entries compared with the index. Not verifiable: Rekor v1 row content, since the dataset has no leaf bodies.
-
-## Security notes
-
-Keys are pinned, never fetched at runtime. Services run sandboxed as `clickhouse` (`ProtectSystem=strict`). The API
-is plain HTTP on the configured bind; put Caddy in front for TLS. The service account key lives in
-`/srv/index/gcloud` (0700) and can only touch the one project. Archives are read-only files; the only in-place writes
-are `quality.py repair`, serialized by a lock, replacing dataset placeholders with rows from the live log.
+Everything runs as one unprivileged user, ClickHouse listens on localhost, the API queries through a read-only
+database user with per-query limits, and the archives are read-only files. Put the API behind TLS before giving it
+a hostname.
