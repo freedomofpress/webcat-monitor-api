@@ -1,0 +1,13 @@
+[Unit]
+Description=webcat log auditor API
+After=network-online.target clickhouse-server.service
+
+[Service]
+User=clickhouse
+Group=clickhouse
+ExecStart=/usr/bin/python3 /opt/webcat-monitor/api.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

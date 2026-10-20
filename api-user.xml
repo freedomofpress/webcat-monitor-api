@@ -1,0 +1,22 @@
+<clickhouse>
+  <!-- /etc/clickhouse-server/users.d/api.xml: the API's read-only ClickHouse user, local only, with hard limits -->
+  <profiles>
+    <api>
+      <readonly>1</readonly>
+      <max_threads>2</max_threads>
+      <max_memory_usage>500000000</max_memory_usage>
+      <max_execution_time>10</max_execution_time>
+      <max_result_rows>5000</max_result_rows>
+      <result_overflow_mode>break</result_overflow_mode>
+      <max_concurrent_queries_for_user>8</max_concurrent_queries_for_user>
+    </api>
+  </profiles>
+  <users>
+    <api>
+      <password></password>
+      <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+      <profile>api</profile>
+      <quota>default</quota>
+    </api>
+  </users>
+</clickhouse>
