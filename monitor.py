@@ -9,7 +9,12 @@ local copy up to date and verifies it. New instance = config block. New log type
 import argparse, logging, pathlib, sys, tomllib
 import rekor_v1, rekor_v2, sigsum
 
-FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1.fetch}
+def rekor_v1_fetch_and_verify(src, paths):
+    rekor_v1.fetch(src, paths)
+    import verify_v1
+    verify_v1.run(src)  # extends the per-shard Merkle frontiers over the new leaves and checks them against the signed tree heads
+
+FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1_fetch_and_verify}
 
 def main():
     ap = argparse.ArgumentParser()
@@ -20,6 +25,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = tomllib.loads(pathlib.Path(a.config).read_text())
     paths = {k: pathlib.Path(v) for k, v in cfg["paths"].items()}
+    import hashlib
+    paths["witnesses"] = {hashlib.sha256(bytes.fromhex(k)).hexdigest(): k for k in cfg.get("witnesses", {}).values()}  # key hash -> key
     failed = 0
     for src in cfg["source"]:
         if a.names and src["name"] not in a.names: continue

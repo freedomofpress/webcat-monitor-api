@@ -36,3 +36,12 @@ def ch(query, data=None, params=None):
         except urllib.error.HTTPError as e:
             if e.code < 500 or n == 19: raise
             time.sleep(30)
+
+
+def record_status(name, status):
+    """Merge one log's latest verification result into /srv/index/verification.json (served by /v1/status)."""
+    import json, pathlib, time
+    f = pathlib.Path("/srv/index/verification.json")
+    d = json.loads(f.read_text()) if f.exists() else {}
+    d[name] = {**status, "checked_at": int(time.time())}
+    f.write_text(json.dumps(d, indent=1))

@@ -27,8 +27,22 @@ key = "f00c159663d09bbda6131ee1816863b6adcacfe80b0b288000b11aba8fe38314"  # prod
 name = "log2025-1"
 type = "rekor-v2"
 url = "https://log2025-1.rekor.sigstore.dev"  # shard rotates ~every 6 months; add the next one as a new block
+key = "t8rlp1knGwjfbcXAYPYAkn0XiLz1x8O4t0YkEhie244="  # Ed25519, from the Sigstore trusted root (TUF), valid from 2025-09-23
 
 [[source]]
 name = "rekor-v1"
 type = "rekor-v1"
 url = "https://rekor.sigstore.dev"
+# ECDSA P-256, from the Sigstore trusted root (TUF) and /api/v1/log/publicKey, valid from 2021-01-12
+key_pem = """-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr
+kBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==
+-----END PUBLIC KEY-----"""
+
+# Sigsum witnesses (https://www.sigsum.org/services/): cosignatures by these keys are verified and counted.
+[witnesses]
+"witness.glasklar.is" = "b2106db9065ec97f25e09c18839216751a6e26d8ed8b41e485a563d3d1498536"
+"witness.mullvad.net" = "15d6d0141543247b74bab3c1076372d9c894f619c376d64b29aa312cc00f61ad"
+"poc.sigsum.org/nisse" = "1c25f8a44c635457e2e391d1efbca7d4c2951a0aef06225a881e46b98962ac6c"
+"rgdd.se/poc-witness" = "28c92a5a3a054d317c86fc2eeb6a7ab2054d6217100d0be67ded5b74323c5806"
+"witness1.smartit.nu/witness1" = "f4855a0f46e8a3e23bb40faf260ee57ab8a18249fa402f2ca2d28a60e1a3130e"

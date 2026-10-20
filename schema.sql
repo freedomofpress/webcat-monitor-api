@@ -69,3 +69,10 @@ CREATE TABLE IF NOT EXISTS webcat.stage_v1 AS webcat.entries ENGINE = Memory;
 CREATE TABLE IF NOT EXISTS webcat.stats (
   log LowCardinality(String), entries UInt64, newest DateTime, updated DateTime
 ) ENGINE = ReplacingMergeTree(updated) ORDER BY log;
+
+-- Rekor v1 leaf hashes by log index (UUID = tree id || leaf hash), for the Merkle check against the signed tree heads.
+CREATE TABLE IF NOT EXISTS webcat.leaves_v1 (
+  log_index UInt64 CODEC(Delta, ZSTD),
+  tree_id String,
+  leaf_hash FixedString(32)
+) ENGINE = ReplacingMergeTree ORDER BY log_index SETTINGS storage_policy = 'hdd';

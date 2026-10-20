@@ -81,8 +81,10 @@ def route(path, qs, body=None):
     if parts == ["v1", "status"]:
         logs = ch("SELECT log, entries, toUnixTimestamp(newest) AS newest, toUnixTimestamp(updated) AS updated FROM webcat.stats FINAL ORDER BY log")
         sigsum = sqlite3.connect(f"file:{SIGSUM_DB}?mode=ro", uri=True).execute("SELECT log, size, fetched_at FROM tree_heads").fetchall()
+        vf = pathlib.Path("/srv/index/verification.json")
         return {"rekor": [{**r, "url": SOURCES.get(r["log"], {}).get("url")} for r in logs],
-                "sigsum": [{"log": l, "url": SOURCES.get(l, {}).get("url"), "size": s, "fetched_at": t} for l, s, t in sigsum]}
+                "sigsum": [{"log": l, "url": SOURCES.get(l, {}).get("url"), "size": s, "fetched_at": t} for l, s, t in sigsum],
+                "verification": json.loads(vf.read_text()) if vf.exists() else {}}
     if parts == ["v1", "sigstore", "history"]:
         claims = body.get("claims") if body else {m.group(1): v[0] for k, v in urllib.parse.parse_qs(qs).items() if (m := re.match(r"^claims\[([0-9.]+)\]$", k))}
         if not claims: raise Bad(400, "no claims: pass claims[<oid>]=<value> query parameters, or POST {\"claims\": {...}}")

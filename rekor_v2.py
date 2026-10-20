@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import zstandard
 from cryptography import x509
-from util import get, merkle_root, ch
+from util import get, merkle_root, ch, record_status
+from notes import verify_checkpoint
 
 WIDTH = 256
 WORKERS = 32
@@ -136,6 +137,7 @@ def fetch(src, paths):
     (root / "parsed").mkdir(parents=True, exist_ok=True)
     cp = get(url + "/checkpoint").decode()
     origin, size, root_hash = cp.split("\n")[0], int(cp.split("\n")[1]), base64.b64decode(cp.split("\n")[2])
+    cosigs = verify_checkpoint(cp, src.get("origin", url.split("://")[1]), base64.b64decode(src["key"]))  # raises on a bad log signature
     full, tail = divmod(size, WIDTH)
     tail_hashes = get(f"{url}/tile/0/{tile_path(full)}.p/{tail}") if tail else b""
     if len(tail_hashes) != 32 * tail: raise RuntimeError(f"{name}: partial tile has {len(tail_hashes) // 32} hashes, want {tail}")
@@ -182,7 +184,7 @@ def fetch(src, paths):
     if tail: nodes.append(merkle_root([tail_hashes[i:i + 32] for i in range(0, 32 * tail, 32)]))
     if merkle_root(nodes) != root_hash:
         raise RuntimeError(f"{name}: tile roots do not hash to the checkpoint root at size {size}")
-    # ponytail: checkpoint signature is not verified (no ed25519 in the stdlib). The signed checkpoint is stored raw.
     (root / "checkpoint").write_text(cp)
     state.update({"size": size, "bundles": full}); state_file.write_text(json.dumps(state))
-    logging.info("%s: size %d, %d full bundles, root verified", name, size, full)
+    record_status(name, {"size": size, "root": root_hash.hex(), "entries_hash_to_tiles": True, "tiles_hash_to_root": True, "log_signature": True, "cosignatures_verified": cosigs})
+    logging.info("%s: size %d, %d full bundles, root verified, checkpoint signature OK", name, size, full)

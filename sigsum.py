@@ -1,7 +1,8 @@
 """Sigsum logs: every leaf goes into sqlite, indexed by signer key hash, and the local
 leaves are rehashed against the log's tree head root on every run."""
 import hashlib, logging, re, sqlite3
-from util import get, merkle_root
+from util import get, merkle_root, record_status
+from notes import verify_sigsum_tree_head
 
 BATCH = 4096  # logs cap this themselves and return fewer; the loop handles that
 
@@ -20,8 +21,7 @@ def fetch(src, paths):
     db = sqlite3.connect(paths["index"] / "sigsum.db")
     db.executescript(SCHEMA)
     th = get(url + "/get-tree-head").decode()
-    size = int(re.search(r"^size=(\d+)$", th, re.M)[1])
-    root = bytes.fromhex(re.search(r"^root_hash=([0-9a-f]{64})$", th, re.M)[1])
+    size, root, cosigs = verify_sigsum_tree_head(th, src["key"], paths.get("witnesses", {}))  # raises on a bad log signature
     have = db.execute("SELECT COALESCE(MAX(idx) + 1, 0) FROM leaves WHERE log = ?", (name,)).fetchone()[0]
     i = have
     while i < size:
@@ -37,7 +37,7 @@ def fetch(src, paths):
               db.execute("SELECT key_hash, checksum, signature FROM leaves WHERE log = ? AND idx < ? ORDER BY idx", (name, size))]
     if len(hashes) != size or merkle_root(hashes) != root:
         raise RuntimeError(f"{name}: local leaves do not hash to the published root at size {size}")
-    # ponytail: tree head signature and witness cosignatures are not checked (no ed25519 in the stdlib). Stored raw for later.
     db.execute("INSERT OR REPLACE INTO tree_heads VALUES (?,?,?,?,strftime('%s','now'))", (name, size, root, th))
     db.commit()
-    logging.info("%s: %d leaves (+%d), root verified", name, size, size - have)
+    record_status(name, {"size": size, "root": root.hex(), "leaves_hash_to_root": True, "log_signature": True, "cosignatures_verified": cosigs})
+    logging.info("%s: %d leaves (+%d), root verified, log signature OK, %d cosignatures verified", name, size, size - have, cosigs)

@@ -64,3 +64,7 @@ SELECT DISTINCT unhex(h) AS sha, 'rekor-v1' AS log, toUInt64(LogIndex) AS log_in
 FROM file({file:String}, Parquet)
 ARRAY JOIN arrayMap(x -> ifNull(x.2, ''), arrayFilter(x -> x.1 IN ('1.3.6.1.4.1.57264.1.3', '1.3.6.1.4.1.57264.1.13'), Extensions)) AS h
 WHERE LogIndex IS NOT NULL AND length(h) = 40 AND match(h, '^[0-9a-f]{40}$');
+
+INSERT INTO webcat.leaves_v1
+SELECT DISTINCT toUInt64(LogIndex), left(hex(EntryUUID), 16), substring(EntryUUID, 9, 32)
+FROM file({file:String}, Parquet) WHERE LogIndex IS NOT NULL AND length(EntryUUID) = 40;
