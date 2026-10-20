@@ -65,7 +65,7 @@ GET /v1/artifact/4f0a230f351e315bef22714ff5f85798c9103fba7c66f87e76942d8fcb33e8e
 GET /v1/status
 ```
 
-Consumers: `webcat audit <domain>` in webcat-cli; explore.webcat.tech per-site Sigstore history.
+Consumers (both in draft, not merged): a `webcat audit <domain>` command for webcat-cli; per-site Sigstore history in webcat-explorer.
 
 ## Limits
 

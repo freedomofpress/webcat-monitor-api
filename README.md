@@ -2,9 +2,10 @@
 
 The log auditor for [WEBCAT](https://github.com/freedomofpress/webcat). It mirrors the transparency logs WEBCAT
 trusts (Sigsum logs, Rekor v1 and v2), verifies them, indexes every signer identity and claim, and serves the result
-as a small read-only API. `webcat audit` in the [CLI](https://github.com/freedomofpress/webcat-cli) and the
-[explorer](https://github.com/freedomofpress/webcat-explorer) use it to show the full signing history of an enrolled
-site, which neither Rekor's search nor Sigsum offer by themselves.
+as a small read-only API. It gives the full signing history of an enrolled site, which neither Rekor's search nor
+Sigsum offer by themselves. The [explorer](https://github.com/freedomofpress/webcat-explorer) will use it for
+per-site history, and a `webcat audit` command for the [CLI](https://github.com/freedomofpress/webcat-cli) is in
+draft.
 
 Current sizes, latencies and endpoint examples are in [STATUS.md](STATUS.md).
 
