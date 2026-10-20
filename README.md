@@ -14,7 +14,7 @@ The monitor and ClickHouse run as the `clickhouse` user, which owns `/srv/index`
 
 Deploy: `rsync -a --exclude .git ./ root@HOST:/opt/webcat-monitor/ && ssh root@HOST 'cp /opt/webcat-monitor/webcat-monitor.* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now webcat-monitor.timer'`
 
-Not verified yet: Sigsum tree head signatures and witness cosignatures, Rekor checkpoint signatures. Both need ed25519, which the stdlib lacks. The signed material is stored raw so it can be checked later.
+Verification (`notes.py`, `merkle.py`, `verify_v1.py`, keys pinned in `sources.toml`): Sigsum tree head signatures and witness cosignatures, Rekor v2 checkpoint signatures, Rekor v1 signed tree heads; Sigsum leaves and Rekor v2 entries are rehashed to the published roots on every run; the Rekor v1 leaf list (UUID = tree id || leaf hash, kept in `webcat.leaves_v1`) is checked per shard against the signed tree heads, with a consistency proof for the active shard, and the per-shard Merkle frontiers persist so a daily run only hashes the new leaves. Results are served under `verification` in `/v1/status`. Not verifiable: the content of Rekor v1 rows (the dataset has no leaf bodies), only the leaf list.
 
 Archive protection: the v1 export is downloaded once, verified against the bucket listing, then made read-only and marked with `download.verified`; the download step never runs again. v2 archive chunks and hash tiles are written once and made read-only after the index load; a resume reuses a read-only chunk and only replaces a writable leftover from a crash. Nothing in the repo deletes anything under `/srv/archive` except raw v2 bundles after they are archived. As root, `chattr +i` on the export files adds a kernel-level guarantee.
 
