@@ -14,6 +14,8 @@ from util import ch, record_status
 BUDGET = 60000
 WORKERS = 6
 NO_CERT_KINDS = ("rfc3161", "tuf")
+PLACEHOLDER = ("ifNull(Issuer, '') = '' AND length(Extensions) = 0 AND length(SANExtensionURIs) = 0 AND length(SANExtensionEmailAddresses) = 0 "
+               "AND length(Digests) = 0 AND length(PGPIdentities) = 0 AND ifNull(IdentityGoType, '') != 'none'")
 RANGES = pathlib.Path("/srv/index/v1_file_ranges.json")
 DROP = {"1.3.6.1.4.1.11129.2.4.2", "2.5.29.14", "2.5.29.35", "2.5.29.15", "2.5.29.37", "2.5.29.19", "2.5.29.17"}  # as the export
 STRUCT = ("LogIndex Nullable(Int64), IntegratedTime Nullable(DateTime64(6, 'UTC')), Kind Nullable(String), EntryUUID Nullable(String), "
@@ -59,8 +61,10 @@ def file_ranges(paths):
     files = sorted(str(p.relative_to(paths["archive"])) for d in ("export/v1", "daily") for p in (paths["archive"] / "rekor-v1" / d).rglob("part-*.parquet"))
     for f in files:
         if f in cached: continue
-        r = ch(f"SELECT arrayMin(arrayMap(rg -> toInt64OrZero(arrayFirst(c -> c.name = 'LogIndex', rg.columns).statistics.min), row_groups)), "
-               f"arrayMax(arrayMap(rg -> toInt64OrZero(arrayFirst(c -> c.name = 'LogIndex', rg.columns).statistics.max), row_groups)) FROM file({f!r}, ParquetMetadata) FORMAT TSV").split()
+        r = ch(f"SELECT arrayMin(arrayMap(rg -> toInt64OrNull(arrayFirst(c -> c.name = 'LogIndex', rg.columns).statistics.min), row_groups)), "
+               f"arrayMax(arrayMap(rg -> toInt64OrNull(arrayFirst(c -> c.name = 'LogIndex', rg.columns).statistics.max), row_groups)) FROM file({f!r}, ParquetMetadata) FORMAT TSV").split()
+        if "\\N" in r:  # no statistics in the footer: read the column
+            r = ch(f"SELECT min(LogIndex), max(LogIndex) FROM file({f!r}, Parquet) SETTINGS max_threads = 1 FORMAT TSV").split()
         cached[f] = [int(r[0]), int(r[1])]
     RANGES.write_text(json.dumps(cached))
     return {f: v for f, v in cached.items() if f in files}
@@ -78,7 +82,7 @@ def replace_index_rows(indices):
 
 def repair_file(url, paths, rel, idxs):
     """Replace the placeholder rows of one export file. Returns (entries fetched, entries given an identity)."""
-    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND ifNull(Issuer, '') = '' AND length(Extensions) = 0 AND ifNull(IdentityGoType, '') != 'none' FORMAT TSV").split()]
+    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()]
     if not present: return 0, 0
     with ThreadPoolExecutor(WORKERS) as ex: fetched = list(ex.map(lambda i: fetch_entry(url, i), present))
     rows = [export_row(uuid, v) for uuid, v in fetched]
@@ -92,7 +96,7 @@ def repair_file(url, paths, rel, idxs):
     tmp = rel + ".tmp"
     ids = ",".join(map(str, present))
     ch(f"INSERT INTO FUNCTION file({tmp!r}, 'Parquet', {STRUCT!r}) SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd', max_threads = 1, max_memory_usage = 1500000000, input_format_parquet_use_native_reader = 1 "
-       f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN ({ids}) AND ifNull(Issuer, '') = '' AND length(Extensions) = 0) "
+       f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN ({ids}) AND {PLACEHOLDER}) "
        f"UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
     old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) FORMAT TSV").strip()) for f in (rel, tmp))
     if old != new: raise RuntimeError(f"{rel}: row count changed {old} -> {new}, not replacing")
