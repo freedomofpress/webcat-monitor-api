@@ -1,8 +1,8 @@
 """Sigsum logs: every leaf goes into sqlite, indexed by signer key hash, and the local
 leaves are rehashed against the log's tree head root on every run."""
 import hashlib, logging, re, sqlite3
-from util import get, merkle_root, record_status
-from notes import verify_sigsum_tree_head
+from util import get, record_status
+from verify import merkle_root, verify_sigsum_tree_head
 
 BATCH = 4096  # logs cap this themselves and return fewer; the loop handles that
 

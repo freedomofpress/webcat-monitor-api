@@ -2,8 +2,20 @@
 # Adding another Sigsum or Rekor instance is a new block here, no code.
 
 [paths]
-index = "/srv/index"      # NVMe: databases and indexes
-archive = "/srv/archive"  # HDD: raw log mirrors
+index = "/srv/index"      # NVMe: ClickHouse, Sigsum SQLite, state files
+archive = "/srv/archive"  # HDD: the archives (v1 export + increments, v2 parsed chunks + hash tiles)
+
+[gcp]  # Rekor v1 comes from Google's BigQuery dataset; a service account with bigquery.jobUser, bigquery.dataEditor
+       # and objectAdmin on the bucket, activated into `credentials` (see setup.sh). Nothing else talks to Google.
+project = "webcat-511408"
+dataset = "rekor_export"
+bucket = "gs://webcat-511408-rekor-export"
+credentials = "/srv/index/gcloud"
+export_snapshot = "2026-10-18T10:41:00Z"  # start of the one-time export: the first daily increment continues from here
+
+[api]
+bind = "0.0.0.0"
+port = 8080
 
 [[source]]
 name = "seasalp"

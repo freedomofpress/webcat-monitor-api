@@ -7,16 +7,15 @@ Each [[source]] in the config has a `type`; FETCHERS maps a type to one function
 local copy up to date and verifies it. New instance = config block. New log type = one function here.
 """
 import argparse, logging, pathlib, sys, tomllib
-import rekor_v1, rekor_v2, sigsum
+import quality, rekor_v1, rekor_v2, sigsum, verify
 
-def rekor_v1_fetch_and_verify(src, paths):
-    rekor_v1.fetch(src, paths)
-    import verify_v1, sample_v1, repair_v1
-    verify_v1.run(src)  # extends the per-shard Merkle frontiers over the new leaves and checks them against the signed tree heads
-    sample_v1.check(src)  # random entries fetched from the live log: leaf hash and parsed fields vs the index
-    repair_v1.run(src, paths)  # entries the dataset left without an identity get theirs from the live log
+def rekor_v1_daily(src, paths):
+    rekor_v1.fetch(src, paths)          # the increment
+    verify.rekor_v1_leaves(src)         # Merkle frontiers extended over the new leaves, checked against the signed heads
+    quality.sample(src)                 # random live entries compared with the index
+    quality.repair(src, paths)          # identities the dataset lacks, fetched from the live log
 
-FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1_fetch_and_verify}
+FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1_daily}
 
 def main():
     ap = argparse.ArgumentParser()
@@ -32,6 +31,7 @@ def main():
     failed = 0
     for src in cfg["source"]:
         if a.names and src["name"] not in a.names: continue
+        src["_cfg"] = cfg
         try:
             if a.rewrite_archive is not None:
                 if src["type"] == "rekor-v2": rekor_v2.rewrite_archive(src, paths, a.rewrite_archive)

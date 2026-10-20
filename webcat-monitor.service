@@ -1,12 +1,19 @@
 [Unit]
-Description=webcat-monitor: mirror and verify the logs WEBCAT trusts
-After=network-online.target srv-index.mount srv-archive.mount
+Description=webcat-monitor: fetch, verify and index the logs WEBCAT trusts
+After=network-online.target clickhouse-server.service srv-index.mount srv-archive.mount
 
 [Service]
+Type=oneshot
 User=clickhouse
 Group=clickhouse
-Type=oneshot
 WorkingDirectory=/opt/webcat-monitor
+Environment=CLOUDSDK_CONFIG=/srv/index/gcloud HOME=/srv/index
+# one lock for every writer: this timer, manual runs, bootstrap
 ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py
 Nice=10
 IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/srv/index /srv/archive /run/lock

@@ -1,0 +1,39 @@
+<clickhouse>
+  <!-- /etc/clickhouse-server/config.d/webcat.xml. Sized for 4 cores / 6 GB; the python fetchers share the box. -->
+  <listen_host>127.0.0.1</listen_host>
+  <path>/srv/index/clickhouse/</path>
+  <tmp_path>/srv/index/clickhouse/tmp/</tmp_path>
+  <user_files_path>/srv/archive/</user_files_path>
+
+  <!-- an absolute cap, not a ratio of what happened to be free at startup -->
+  <max_server_memory_usage>3400000000</max_server_memory_usage>
+  <max_server_memory_usage_to_ram_ratio>0</max_server_memory_usage_to_ram_ratio>
+  <mark_cache_size>536870912</mark_cache_size>
+
+  <!-- few concurrent merges, never starving the loaders; the merge_tree thresholds must stay below pool * ratio -->
+  <background_pool_size>4</background_pool_size>
+  <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+  <merges_mutations_memory_usage_soft_limit>1000000000</merges_mutations_memory_usage_soft_limit>
+  <merge_tree>
+    <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
+    <number_of_free_entries_in_pool_to_lower_max_size_of_merge>4</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+    <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+  </merge_tree>
+
+  <!-- default = NVMe, hdd = the archive volume. "tiered": parts live on the NVMe and move to the HDD below 15% free. -->
+  <storage_configuration>
+    <disks>
+      <hdd><path>/srv/archive/clickhouse/</path></hdd>
+    </disks>
+    <policies>
+      <tiered>
+        <volumes>
+          <default><disk>default</disk></default>
+          <cold><disk>hdd</disk></cold>
+        </volumes>
+        <move_factor>0.15</move_factor>
+      </tiered>
+      <hdd><volumes><main><disk>hdd</disk></main></volumes></hdd>
+    </policies>
+  </storage_configuration>
+</clickhouse>

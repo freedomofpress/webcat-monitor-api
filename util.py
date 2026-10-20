@@ -15,14 +15,6 @@ def get(url, timeout=120, tries=5):
             if n == tries - 1: raise
         time.sleep(2 ** n)
 
-def merkle_root(hashes):
-    """RFC 6962 tree hash over a list of node hashes. Also correct over 256-aligned subtree roots, see rekor_v2."""
-    if len(hashes) == 1: return hashes[0]
-    k = 1
-    while k * 2 < len(hashes): k *= 2
-    import hashlib
-    return hashlib.sha256(b"\x01" + merkle_root(hashes[:k]) + merkle_root(hashes[k:])).digest()
-
 def ch(query, data=None, params=None):
     """Run a query on the local ClickHouse over HTTP. data = request body (e.g. JSONEachRow rows for an INSERT);
     params = values for {name:Type} placeholders in the query."""

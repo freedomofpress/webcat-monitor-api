@@ -6,11 +6,8 @@ The index is a projection of the archive: rebuilding it is rerunning load_v2.sql
 Set keep_bundles = true on a source to also keep the raw bundles zstd-compressed (~540 bytes/entry)."""
 import base64, hashlib, json, logging, pathlib, struct, time
 from concurrent.futures import ThreadPoolExecutor
-import urllib.parse
-import zstandard
-from cryptography import x509
-from util import get, merkle_root, ch, record_status
-from notes import verify_checkpoint
+from util import get, ch, record_status
+from verify import merkle_root, verify_checkpoint
 
 WIDTH = 256
 WORKERS = 32
@@ -61,6 +58,7 @@ def verifiers(entry):
 def record(index, now, kind, v, digest):
     """Archive record for one signer: everything a claim could match on, the artifact digest, and the raw key for
     key-based signers. time is our fetch time: a v2 leaf carries no timestamp; the index uses not_before instead."""
+    from cryptography import x509  # lazy: the offline tests import this module without it
     r = {"log_index": index, "time": now, "kind": kind, "issuer_dn": "", "not_before": "1970-01-01 00:00:00",
          "san_uris": [], "san_emails": [], "san_other": [], "key_details": v.get("keyDetails", ""), "key_digest": "",
          "key_raw": "", "artifact_digest": digest, "ext": {}}
@@ -84,6 +82,7 @@ def record(index, now, kind, v, digest):
 def process_bundle(name, url, root, n, now, keep, force=False):
     """Fetch (or read) bundle n, verify every entry against its level-0 hash tile, return (subtree root, archive rows).
     force=True ignores a stored bundle and refetches, for archive rewrites."""
+    import zstandard
     p = tile_path(n)
     bdst, hdst = root / "tile" / "entries" / (p + ".zst"), root / "tile" / "0" / p
     bundle = zstandard.decompress(bdst.read_bytes()) if bdst.exists() and not force else get(f"{url}/tile/entries/{p}")

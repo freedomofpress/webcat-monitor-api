@@ -1,5 +1,5 @@
 [Unit]
-Description=webcat log auditor API
+Description=webcat log auditor API (read-only JSON over the index)
 After=network-online.target clickhouse-server.service
 
 [Service]
@@ -8,6 +8,12 @@ Group=clickhouse
 ExecStart=/usr/bin/python3 /opt/webcat-monitor/api.py
 Restart=always
 RestartSec=3
+# read-only everything except what the API never writes anyway
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/opt/webcat-monitor /srv/index
 
 [Install]
 WantedBy=multi-user.target

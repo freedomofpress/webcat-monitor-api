@@ -1,5 +1,5 @@
 <clickhouse>
-  <!-- /etc/clickhouse-server/users.d/api.xml: the API's read-only ClickHouse user, local only, with hard limits -->
+  <!-- /etc/clickhouse-server/users.d/webcat.xml: the API's read-only user, local only, hard-limited per query -->
   <profiles>
     <api>
       <readonly>1</readonly>

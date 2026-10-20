@@ -19,7 +19,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CH = "http://127.0.0.1:8123/?user=api&"
 SIGSUM_DB = "/srv/index/sigsum.db"
-PORT = 8080
 MAX_INFLIGHT = 8
 QUEUE_SECONDS = 3  # a burst waits this long for a slot before getting a 503; queries cost ~100 ms, so a 9-wide burst never waits
 LIMIT, MAX_LIMIT = 500, 2000
@@ -31,7 +30,8 @@ SAN, ISSUER, ISSUER_V1 = "2.5.29.17", "1.3.6.1.4.1.57264.1.8", "1.3.6.1.4.1.5726
 DRIVERS = ["1.3.6.1.4.1.57264.1.9", "1.3.6.1.4.1.57264.1.18", "1.3.6.1.4.1.57264.1.12", "1.3.6.1.4.1.57264.1.5",
            "1.3.6.1.4.1.57264.1.16", "1.3.6.1.4.1.57264.1.24", "1.3.6.1.4.1.57264.1.14", "1.3.6.1.4.1.57264.1.4"]
 inflight = threading.BoundedSemaphore(MAX_INFLIGHT)
-SOURCES = {s["name"]: s for s in tomllib.loads(pathlib.Path(__file__).with_name("sources.toml").read_text())["source"]}
+CFG = tomllib.loads(pathlib.Path(__file__).with_name("sources.toml").read_text())
+SOURCES = {s["name"]: s for s in CFG["source"]}
 
 class Bad(Exception):
     def __init__(self, status, msg): self.status, self.msg = status, msg
@@ -132,4 +132,4 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    ThreadingHTTPServer((CFG["api"]["bind"], CFG["api"]["port"]), Handler).serve_forever()
