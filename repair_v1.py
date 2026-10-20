@@ -65,9 +65,9 @@ def file_ranges(paths):
                f"arrayMax(arrayMap(rg -> toInt64OrNull(arrayFirst(c -> c.name = 'LogIndex', rg.columns).statistics.max), row_groups)) FROM file({f!r}, ParquetMetadata) FORMAT TSV").split()
         if "\\N" in r:  # no statistics in the footer: read the column
             r = ch(f"SELECT min(LogIndex), max(LogIndex) FROM file({f!r}, Parquet) SETTINGS max_threads = 1 FORMAT TSV").split()
-        cached[f] = [int(r[0]), int(r[1])]
+        cached[f] = [int(r[0]), int(r[1])] if "\\N" not in r else None  # None: an empty file (a daily increment with no rows)
     RANGES.write_text(json.dumps(cached))
-    return {f: v for f, v in cached.items() if f in files}
+    return {f: v for f, v in cached.items() if f in files and v}
 
 def replace_index_rows(indices):
     """Drop every index row for these v1 log indices, each delete riding its table's key."""
