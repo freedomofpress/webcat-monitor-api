@@ -12,7 +12,7 @@ Claim semantics are the extension's ClaimPolicy: every claim must match; a value
 the SAN claim (2.5.29.17) matches any SAN. Queries run as the read-only ClickHouse user "api" whose profile caps
 threads, memory and time; this process allows MAX_INFLIGHT queries at once and answers 503 beyond that.
 """
-import base64, hashlib, json, re, sqlite3, threading, urllib.parse, urllib.request
+import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CH = "http://127.0.0.1:8123/?user=api&"
@@ -28,6 +28,7 @@ SAN, ISSUER, ISSUER_V1 = "2.5.29.17", "1.3.6.1.4.1.57264.1.8", "1.3.6.1.4.1.5726
 DRIVERS = ["1.3.6.1.4.1.57264.1.9", "1.3.6.1.4.1.57264.1.18", "1.3.6.1.4.1.57264.1.12", "1.3.6.1.4.1.57264.1.5",
            "1.3.6.1.4.1.57264.1.16", "1.3.6.1.4.1.57264.1.24", "1.3.6.1.4.1.57264.1.14", "1.3.6.1.4.1.57264.1.4"]
 inflight = threading.BoundedSemaphore(MAX_INFLIGHT)
+SOURCES = {s["name"]: s for s in tomllib.loads(pathlib.Path(__file__).with_name("sources.toml").read_text())["source"]}
 
 class Bad(Exception):
     def __init__(self, status, msg): self.status, self.msg = status, msg
@@ -73,28 +74,29 @@ def route(path, qs):
     limit = min(int(q.get("limit", LIMIT)), MAX_LIMIT)
     parts = path.strip("/").split("/")
     if parts == ["v1", "status"]:
-        logs = ch("SELECT log, count() AS entries, max(time) AS newest FROM webcat.entries_by_time GROUP BY log")
+        logs = ch("SELECT log, entries, toUnixTimestamp(newest) AS newest, toUnixTimestamp(updated) AS updated FROM webcat.stats FINAL ORDER BY log")
         sigsum = sqlite3.connect(f"file:{SIGSUM_DB}?mode=ro", uri=True).execute("SELECT log, size, fetched_at FROM tree_heads").fetchall()
-        return {"rekor": logs, "sigsum": [{"log": l, "size": s, "fetched_at": t} for l, s, t in sigsum]}
+        return {"rekor": [{**r, "url": SOURCES.get(r["log"], {}).get("url")} for r in logs],
+                "sigsum": [{"log": l, "url": SOURCES.get(l, {}).get("url"), "size": s, "fetched_at": t} for l, s, t in sigsum]}
     if parts == ["v1", "sigstore", "history"]:
         try: claims = json.loads(base64.urlsafe_b64decode(q["claims"] + "=" * (-len(q["claims"]) % 4)))
         except Exception: raise Bad(400, "claims must be urlsafe base64 of a JSON object")
         rows = with_links(ch(history_sql(claims, limit, q.get("before"))))
         return {"claims": claims, "total": len(rows), "truncated": len(rows) == limit, "entries": rows}
     if parts == ["v1", "sigsum", "history"]:
-        key = q.get("key") or hashlib.sha256(base64.urlsafe_b64decode(q["signer"] + "=" * (-len(q["signer"]) % 4))).hexdigest() if q.get("signer") else None
+        key = q.get("key") or (hashlib.sha256(base64.urlsafe_b64decode(q["signer"] + "=" * (-len(q["signer"]) % 4))).hexdigest() if q.get("signer") else None)
         if not key or not re.match(r"^[0-9a-f]{64}$", key): raise Bad(400, "key must be 64 hex chars, or pass signer=<base64url public key>")
         db = sqlite3.connect(f"file:{SIGSUM_DB}?mode=ro", uri=True)
         rows = db.execute("SELECT log, idx, hex(checksum) FROM leaves WHERE key_hash = ? ORDER BY log, idx LIMIT ?", (bytes.fromhex(key), limit)).fetchall()
-        urls = {l: u for l, u in db.execute("SELECT log, url FROM logs").fetchall()} if db.execute("SELECT name FROM sqlite_master WHERE name = 'logs'").fetchone() else {}
+        url = lambda l: SOURCES.get(l, {}).get("url", "").rstrip("/")
         return {"key_hash": key, "total": len(rows), "truncated": len(rows) == limit,
-                "leaves": [{"log": l, "index": i, "checksum": c.lower(), "leaf_url": f"{urls[l]}/get-leaves/{i}/{i + 1}" if l in urls else None} for l, i, c in rows]}
+                "leaves": [{"log": l, "index": i, "checksum": c.lower(), "leaf_url": f"{url(l)}/get-leaves/{i}/{i + 1}" if url(l) else None} for l, i, c in rows]}
     if len(parts) == 4 and parts[:2] == ["v1", "entry"] and parts[3].isdigit():
         return {"entries": with_links(ch(f"SELECT DISTINCT log, log_index, toUnixTimestamp(time) AS time, kind, issuer, identity, ext FROM webcat.entries_by_index WHERE log = {lit(parts[2])} AND log_index = {int(parts[3])}"))}
     if len(parts) == 3 and parts[:2] == ["v1", "sha"] and re.match(r"^[0-9a-f]{40}$", parts[2]):
-        return {"sha": parts[2], "entries": with_links(ch(f"SELECT DISTINCT e.log, e.log_index, toUnixTimestamp(e.time) AS time, e.kind, e.issuer, e.identity FROM webcat.sha AS s INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE s.sha = unhex({lit(parts[2])}) LIMIT {limit}"))}
+        return {"sha": parts[2], "entries": with_links(ch(f"SELECT DISTINCT e.log AS log, e.log_index AS log_index, toUnixTimestamp(e.time) AS time, e.kind AS kind, e.issuer AS issuer, e.identity AS identity FROM webcat.sha AS s INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE s.sha = unhex({lit(parts[2])}) LIMIT {limit}"))}
     if len(parts) == 3 and parts[:2] == ["v1", "artifact"] and re.match(r"^[0-9a-f]{64}$", parts[2]):
-        return {"digest": parts[2], "entries": with_links(ch(f"SELECT DISTINCT e.log, e.log_index, toUnixTimestamp(e.time) AS time, e.kind, e.issuer, e.identity FROM webcat.artifact AS a INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE a.digest = unhex({lit(parts[2])}) LIMIT {limit}"))}
+        return {"digest": parts[2], "entries": with_links(ch(f"SELECT DISTINCT e.log AS log, e.log_index AS log_index, toUnixTimestamp(e.time) AS time, e.kind AS kind, e.issuer AS issuer, e.identity AS identity FROM webcat.artifact AS a INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE a.digest = unhex({lit(parts[2])}) LIMIT {limit}"))}
     raise Bad(404, "unknown endpoint; see /v1/status, /v1/sigstore/history, /v1/sigsum/history, /v1/entry, /v1/sha, /v1/artifact")
 
 class Handler(BaseHTTPRequestHandler):

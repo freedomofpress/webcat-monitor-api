@@ -34,6 +34,9 @@ def main():
             FETCHERS[src["type"]](src, paths)
         except Exception:
             logging.exception("%s failed", src["name"]); failed += 1
+    if not a.names and not failed:  # a full run: refresh the per-log totals the API's status endpoint serves
+        from util import ch
+        ch("INSERT INTO webcat.stats SELECT log, count(), max(time), now() FROM webcat.entries GROUP BY log SETTINGS max_threads = 2")
     sys.exit(1 if failed else 0)
 
 if __name__ == "__main__": main()
