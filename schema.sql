@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS webcat.entries (
 ) ENGINE = MergeTree ORDER BY (identity, log, log_index);
 
 -- Skip index: which OIDs occur in each block. Makes any query on a rare (custom) OID touch only its blocks.
+-- Query with has(mapKeys(ext), '<oid>'); mapContains() is not recognised by the index.
 ALTER TABLE webcat.entries ADD INDEX IF NOT EXISTS ext_keys mapKeys(ext) TYPE set(100) GRANULARITY 4;
 
 -- Claims side table: distinct (oid, value, identity). Values are nearly constant per identity, so this stays small
@@ -38,8 +39,9 @@ ALTER TABLE webcat.claims MODIFY SETTING storage_policy = 'tiered';
 
 -- Same rows as entries, ordered by (log, log_index): point lookups, "since index N" ranges, resolving SHA or
 -- artifact hits to rows, latest-entries feeds. ~25-30 GB for the history. Filled by the loaders and build_copies.py.
+-- ReplacingMergeTree with identity in the key: a retried multi-part insert cannot leave duplicates behind.
 CREATE TABLE IF NOT EXISTS webcat.entries_by_index AS webcat.entries
-  ENGINE = MergeTree ORDER BY (log, log_index) SETTINGS storage_policy = 'tiered';
+  ENGINE = ReplacingMergeTree ORDER BY (log, log_index, identity) SETTINGS storage_policy = 'tiered';
 
 -- Narrow time-ordered copy: "what was signed between these dates", newest overall. ~10 GB for the history.
 CREATE TABLE IF NOT EXISTS webcat.entries_by_time (

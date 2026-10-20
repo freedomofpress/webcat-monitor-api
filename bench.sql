@@ -17,10 +17,10 @@ SELECT count() FROM webcat.entries WHERE issuer = 'https://gitlab.com';
 SELECT count() FROM webcat.entries WHERE identity IN (SELECT identity FROM webcat.claims WHERE oid = '1.3.6.1.4.1.57264.1.5' AND value = 'freedomofpress/securedrop') AND ext['1.3.6.1.4.1.57264.1.5'] = 'freedomofpress/securedrop';
 -- 8. common OID, prefix, via the claims table then the main key
 SELECT count() FROM webcat.entries WHERE identity IN (SELECT identity FROM webcat.claims WHERE oid = '1.3.6.1.4.1.57264.1.12' AND value LIKE 'https://github.com/freedomofpress/%') AND startsWith(ext['1.3.6.1.4.1.57264.1.12'], 'https://github.com/freedomofpress/');
--- 9. rare OID present at all (keys skip index)
-SELECT count() FROM webcat.entries WHERE mapContains(ext, '1.3.6.1.4.1.99999.42.42');
+-- 9. rare OID present at all (keys skip index: the has(mapKeys()) form is what the index understands, mapContains is not)
+SELECT count() FROM webcat.entries WHERE has(mapKeys(ext), '1.3.6.1.4.1.99999.42.42');
 -- 9b. rare OID, exact value (keys skip index then map)
-SELECT count() FROM webcat.entries WHERE ext['1.3.6.1.4.1.99999.42.42'] = 'x';
+SELECT count() FROM webcat.entries WHERE has(mapKeys(ext), '1.3.6.1.4.1.99999.42.42') AND ext['1.3.6.1.4.1.99999.42.42'] = 'x';
 -- 9c. map scan without any index, the old shape, for reference
 SELECT count() FROM webcat.entries WHERE ext['1.3.6.1.4.1.57264.1.5'] = 'freedomofpress/securedrop';
 -- 10. time range, no identity, via the by-time copy
