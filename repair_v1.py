@@ -13,7 +13,7 @@ from util import ch, record_status
 
 BUDGET = 60000
 WORKERS = 2
-RATE = 3.0                  # requests per second across workers; Rekor answers 429 well below the earlier 9/s
+RATE = 2.0                  # requests per second across workers; Rekor answered 429/503 at 3-9/s. ~170k entries/day.
 _last = [0.0]; _gate = __import__("threading").Lock()
 NO_CERT_KINDS = ("rfc3161", "tuf")
 PLACEHOLDER = ("ifNull(Issuer, '') = '' AND length(Extensions) = 0 AND length(SANExtensionURIs) = 0 AND length(SANExtensionEmailAddresses) = 0 "
@@ -30,7 +30,7 @@ STAGE = ("CREATE TABLE IF NOT EXISTS webcat.stage_repair (LogIndex Int64, Integr
 
 def fetch_entry(url, idx):
     req = urllib.request.Request(f"{url}/api/v1/log/entries?logIndex={idx}", headers={"User-Agent": "webcat-monitor (log auditor, contact: webcat@freedom.press)"})
-    for n in range(10):
+    for n in range(200):  # 429/503 are Rekor asking for patience: wait and go on, up to ~3 hours for one entry
         with _gate:  # token-bucket-lite: one request per 1/RATE seconds across all workers
             wait = _last[0] + 1.0 / RATE - time.monotonic()
             if wait > 0: time.sleep(wait)
@@ -39,12 +39,12 @@ def fetch_entry(url, idx):
             with urllib.request.urlopen(req, timeout=60) as r:
                 uuid, v = next(iter(json.loads(r.read()).items())); return uuid, v
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                time.sleep(float(e.headers.get("Retry-After", 30))); continue
-            if n == 9: raise
+            if e.code in (429, 503):
+                time.sleep(min(float(e.headers.get("Retry-After", 60)), 300)); continue
+            if n >= 9: raise
             time.sleep(2 ** n)
         except Exception:
-            if n == 9: raise
+            if n >= 9: raise
             time.sleep(2 ** n)
     raise RuntimeError(f"rekor-v1 repair: gave up fetching {idx}")
 
