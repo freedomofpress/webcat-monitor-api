@@ -41,12 +41,12 @@ def fetch_entry(url, idx):
         except urllib.error.HTTPError as e:
             if e.code in (429, 503):
                 time.sleep(min(float(e.headers.get("Retry-After", 60)), 300)); continue
-            if n >= 9: raise
+            if n >= 4: logging.warning("rekor-v1 repair: index %d: HTTP %d after %d tries, skipped", idx, e.code, n + 1); return None
             time.sleep(2 ** n)
-        except Exception:
-            if n >= 9: raise
+        except Exception as e:
+            if n >= 9: logging.warning("rekor-v1 repair: index %d: %s, skipped", idx, e); return None
             time.sleep(2 ** n)
-    raise RuntimeError(f"rekor-v1 repair: gave up fetching {idx}")
+    return None
 
 def export_row(uuid, v):
     """A row in the export's schema from a live entry; the certificate dissected the way the dataset does it."""
@@ -96,7 +96,9 @@ def repair_file(url, paths, rel, idxs):
     """Replace the placeholder rows of one export file. Returns (entries fetched, entries given an identity)."""
     present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()]
     if not present: return 0, 0
-    with ThreadPoolExecutor(WORKERS) as ex: fetched = list(ex.map(lambda i: fetch_entry(url, i), present))
+    with ThreadPoolExecutor(WORKERS) as ex: fetched = [f for f in ex.map(lambda i: fetch_entry(url, i), present) if f]
+    present = [v["logIndex"] for _, v in fetched]  # entries the log would not serve stay placeholders for a later run
+    if not present: return 0, 0
     rows = [export_row(uuid, v) for uuid, v in fetched]
     fixed = sum(1 for _, ok in rows if ok)
     ch(STAGE); ch("TRUNCATE TABLE webcat.stage_repair")

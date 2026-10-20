@@ -13,7 +13,8 @@ STATE = pathlib.Path("/srv/index/v1_frontier.json")
 
 def stream(from_index):
     """(log_index, tree_id hex, leaf_hash) in order from webcat.leaves_v1, binary, duplicates collapsed."""
-    q = urllib.parse.urlencode({"query": f"SELECT log_index, unhex(tree_id) AS t, leaf_hash FROM webcat.leaves_v1 WHERE log_index >= {from_index} ORDER BY log_index FORMAT RowBinary SETTINGS max_threads = 2, max_memory_usage = 1500000000, optimize_read_in_order = 1"})
+    # FixedString columns only: RowBinary prefixes a String with its length, which would shift every row
+    q = urllib.parse.urlencode({"query": f"SELECT log_index, toFixedString(unhex(tree_id), 8) AS t, leaf_hash FROM webcat.leaves_v1 WHERE log_index >= {from_index} ORDER BY log_index FORMAT RowBinary SETTINGS max_threads = 2, max_memory_usage = 1500000000, optimize_read_in_order = 1"})
     with urllib.request.urlopen("http://127.0.0.1:8123/?" + q, timeout=None) as r:
         buf = b""; last = None
         while True:
@@ -35,20 +36,25 @@ def run(src):
     n, start = state["next_index"], state["next_index"]
     for idx, tid, h in stream(start):
         if idx != n:
-            logging.error("rekor-v1: gap in leaf list at index %d (next expected %d); verified up to %d", idx, n, n - 1); break
+            logging.error("rekor-v1: gap in leaf list: next expected %d, found %d; verified up to %d", n, idx, n - 1)
+            missing = list(range(n, min(idx, n + 100000)))  # recorded for the repair: these entries are absent from the dataset
+            state_extra = {"gap_at": n, "gap_to": idx}; break
+    else:
+        state_extra = {}; missing = []
         t = tid.hex()
         if t not in shards: shards[t] = Frontier(); order.append(t)
         elif t != order[-1]: raise RuntimeError(f"rekor-v1: index {idx} belongs to shard {t} after shard {order[-1]} already ended")
         shards[t].append(h); n += 1
         if n % 50_000_000 == 0: logging.info("rekor-v1: hashed up to index %d", n)
-    state = {"next_index": n, "order": order, "shards": {k: v.state() for k, v in shards.items()}}
+    state = {"next_index": n, "order": order, "shards": {k: v.state() for k, v in shards.items()}, **state_extra}
     STATE.write_text(json.dumps(state))
+    if missing: pathlib.Path("/srv/index/v1_missing.json").write_text(json.dumps(missing))
     # compare with the log
     info = json.loads(get(url + "/api/v1/log").decode())
     heads = {}
     for sth in [info["signedTreeHead"]] + [s["signedTreeHead"] for s in info["inactiveShards"]]:
         tid, size, root = verify_rekor_v1_sth(sth, src["key_pem"]); heads[int(tid)] = (size, root)
-    result = {"leaves_hashed": n, "log_signatures": True, "shards": {}}
+    result = {"leaves_hashed": n, "log_signatures": True, "shards": {}, **state_extra}
     for t in order:
         f = shards[t]; tid = int(t, 16); size, root = heads[tid]
         if f.size == size:
