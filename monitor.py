@@ -11,8 +11,9 @@ import rekor_v1, rekor_v2, sigsum
 
 def rekor_v1_fetch_and_verify(src, paths):
     rekor_v1.fetch(src, paths)
-    import verify_v1
+    import verify_v1, sample_v1
     verify_v1.run(src)  # extends the per-shard Merkle frontiers over the new leaves and checks them against the signed tree heads
+    sample_v1.check(src)  # random entries fetched from the live log: leaf hash and parsed fields vs the index
 
 FETCHERS = {"sigsum": sigsum.fetch, "rekor-v2": rekor_v2.fetch, "rekor-v1": rekor_v1_fetch_and_verify}
 
