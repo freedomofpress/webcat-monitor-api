@@ -130,63 +130,67 @@ def file_ranges(paths):
     RANGES.write_text(json.dumps(cached))
     return {f: v for f, v in cached.items() if f in files and v}
 
-def replace_index_rows(indices):
-    """Drop every index row for these v1 log indices, each delete riding its table's key."""
-    ids = ",".join(map(str, indices))
-    rows = [json.loads(l) for l in ch(f"SELECT identity, toUnixTimestamp(time) AS t FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index IN ({ids}) FORMAT JSONEachRow").strip().split("\n") if l]
+def replace_index_rows():
+    """Drop every index row for the log indices now in stage_repair, each delete riding its table's key."""
+    sub = "log_index IN (SELECT LogIndex FROM webcat.stage_repair)"
+    rows = [json.loads(l) for l in ch(f"SELECT identity, toUnixTimestamp(time) AS t FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND {sub} FORMAT JSONEachRow").strip().split("\n") if l]
     if not rows: return
-    lit = lambda s: "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    lit = lambda x: "'" + x.replace("\\", "\\\\").replace("'", "\\'") + "'"
     idents = ",".join(lit(i) for i in {r["identity"] for r in rows}); times = ",".join(str(t) for t in {r["t"] for r in rows})
-    ch(f"DELETE FROM webcat.entries WHERE identity IN ({idents}) AND log = 'rekor-v1' AND log_index IN ({ids})")
-    ch(f"DELETE FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND log_index IN ({ids})")
-    ch(f"DELETE FROM webcat.entries_by_time WHERE time IN ({times}) AND log = 'rekor-v1' AND log_index IN ({ids})")
+    ch(f"DELETE FROM webcat.entries WHERE identity IN ({idents}) AND log = 'rekor-v1' AND {sub}")
+    ch(f"DELETE FROM webcat.entries_by_index WHERE log = 'rekor-v1' AND {sub}")
+    ch(f"DELETE FROM webcat.entries_by_time WHERE time IN ({times}) AND log = 'rekor-v1' AND {sub}")
 
-def repair_file(url, paths, rel, idxs, missing=()):
-    """Replace the placeholder rows of one export file, and add rows for `missing` indices the dataset never had.
-    Returns (entries fetched, entries given an identity). Serialized per file across callers."""
+PER_FILE = 5000
+
+def repair_file(url, paths, rel, lo, hi, missing=()):
+    """Replace up to PER_FILE placeholder rows of one export file within [lo, hi], and add rows for `missing` indices
+    the dataset never had. Returns (entries fetched, entries given an identity). Serialized per file across callers."""
     with open(FILE_LOCK, "w") as fl:
         fcntl.flock(fl, fcntl.LOCK_EX)
-        return _repair_file(url, paths, rel, idxs, missing)
+        return _repair_file(url, paths, rel, lo, hi, missing)
 
-def _repair_file(url, paths, rel, idxs, missing):
-    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex IN ({','.join(map(str, idxs))}) AND {PLACEHOLDER} FORMAT TSV").split()] if idxs else []
+def _repair_file(url, paths, rel, lo, hi, missing):
+    present = [int(x) for x in ch(f"SELECT LogIndex FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex BETWEEN {lo} AND {hi} AND {PLACEHOLDER} "
+                                   f"AND ifNull(Kind, '') NOT IN {NO_CERT_KINDS} ORDER BY LogIndex LIMIT {PER_FILE} FORMAT TSV").split()] if lo <= hi else []
     absent = [i for i in missing if not ch(f"SELECT 1 FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE LogIndex = {i} LIMIT 1 FORMAT TSV").strip()]
     present = present + absent
     if not present: return 0, 0
     with ThreadPoolExecutor(WORKERS) as ex: fetched = [f for f in ex.map(lambda i: fetch_entry(url, i), present) if f]
-    present = [v["logIndex"] for _, v in fetched]
-    if not present: return 0, 0
+    if not fetched: return 0, 0
     rows = [export_row(uuid, v) for uuid, v in fetched]
     ch("CREATE TABLE IF NOT EXISTS webcat.stage_repair (LogIndex Int64, IntegratedTime DateTime64(6, 'UTC'), Kind String, EntryUUIDHex String, "
        "IdentityGoType String, Issuer String, NotBefore DateTime64(6, 'UTC'), ExtHex Array(Tuple(String, String, Bool)), "
        "SANExtensionURIs Array(String), SANExtensionEmailAddresses Array(String)) ENGINE = Memory")
     ch("TRUNCATE TABLE webcat.stage_repair")
     ch("INSERT INTO webcat.stage_repair FORMAT JSONEachRow", "\n".join(json.dumps(r) for r, _ in rows).encode())
-    repl, tmp, ids = "rekor-v1/repair.tmp.parquet", rel + ".tmp", ",".join(map(str, present))
+    repl, tmp = "rekor-v1/repair.tmp.parquet", rel + ".tmp"
     a = paths["archive"]; d = (a / rel).parent
     for stale in (a / repl, a / tmp):
-        if stale.exists(): stale.unlink()  # a leftover from a failed run would be appended to, not replaced
-    os.chmod(d, 0o755)  # archive directories are read-only between repairs; the temp file is written next to the original
-    ch(f"INSERT INTO FUNCTION file({repl!r}, 'Parquet', {STRUCT!r}) SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd' "
+        if stale.exists(): stale.unlink()
+    os.chmod(d, 0o755)
+    ch(f"INSERT INTO FUNCTION file({repl!r}, 'Parquet', {STRUCT!r}) SETTINGS output_format_parquet_compression_method = 'zstd' "
        "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
        "arrayMap(x -> (x.1, unhex(x.2), x.3), ExtHex), SANExtensionURIs, SANExtensionEmailAddresses, [], [] FROM webcat.stage_repair")
-    ch(f"INSERT INTO FUNCTION file({tmp!r}, 'Parquet', {STRUCT!r}) SETTINGS engine_file_truncate_on_insert = 1, output_format_parquet_compression_method = 'zstd', "
+    ch(f"INSERT INTO FUNCTION file({tmp!r}, 'Parquet', {STRUCT!r}) SETTINGS output_format_parquet_compression_method = 'zstd', "
        f"max_threads = 1, max_memory_usage = 1500000000, input_format_parquet_use_native_reader = 1 "
-       f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN ({ids}) AND {PLACEHOLDER}) UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
+       f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN (SELECT LogIndex FROM webcat.stage_repair) AND {PLACEHOLDER}) "
+       f"UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
     old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) FORMAT TSV").strip()) for f in (rel, tmp))
-    if new != old + len(absent): raise RuntimeError(f"{rel}: row count {old} -> {new}, expected {old + len(absent)}, not replacing")
+    added = sum(1 for _, v in fetched if v["logIndex"] in absent)
+    if new != old + added: raise RuntimeError(f"{rel}: row count {old} -> {new}, expected {old + added}, not replacing")
     os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444); os.chmod(d, 0o555)
-    replace_index_rows(present)
+    replace_index_rows()
     subprocess.run(["clickhouse-client", f"--param_file={repl}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
     (a / repl).unlink()
-    return len(present), sum(1 for _, ok in rows if ok)
+    return len(fetched), sum(1 for _, ok in rows if ok)
 
 def fill_missing(src, paths, indices):
     """Add entries the dataset never had (reported by the leaf-list check) to their export files. Returns how many were added."""
     url, added = src["url"].rstrip("/"), 0
     for rel, (lo, hi) in sorted(file_ranges(paths).items(), key=lambda kv: kv[1][0]):
         gaps = [i for i in indices if lo <= i <= hi]
-        if gaps: added += repair_file(url, paths, rel, [], gaps)[0]
+        if gaps: added += repair_file(url, paths, rel, 1, 0, gaps)[0]
     return added
 
 def repair(src, paths, budget=BUDGET):
@@ -201,10 +205,11 @@ def repair(src, paths, budget=BUDGET):
     logging.info("rekor-v1 repair: %d placeholder rows and %d missing entries queued (budget %d)", len(queue), len(missing), budget)
     fetched = fixed = files = 0
     for rel, (lo, hi) in sorted(ranges.items(), key=lambda kv: kv[1][0]):
+        if fetched >= budget: break
         idxs = [i for i in queue if lo <= i <= hi]
         gaps = [i for i in missing if lo <= i <= hi]
         if not idxs and not gaps: continue
-        n, k = repair_file(url, paths, rel, idxs, gaps)
+        n, k = repair_file(url, paths, rel, min(idxs) if idxs else 1, max(idxs) if idxs else 0, gaps)
         if n:
             fetched += n; fixed += k; files += 1
             logging.info("rekor-v1 repair: %s: %d rows replaced, %d given an identity (%d fetched so far)", rel, n, k, fetched)
