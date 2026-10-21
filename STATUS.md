@@ -43,7 +43,7 @@ Throughput saturates at ~25 mixed queries/s on 4 cores; p95 under 0.3 s at 4 in 
 
 ## API
 
-Read-only JSON at `http://216.176.239.201:8080` (hostname and TLS pending). Claim semantics are the extension's: all claims must match, `^` prefixes, the SAN claim matches any SAN.
+Read-only JSON at https://monitor-api.webcat.tech (nginx, Let's Encrypt); the homepage lists totals and endpoints. Claim semantics are the extension's: all claims must match, `^` prefixes, the SAN claim matches any SAN.
 
 ```
 # everything freedomofpress signed through GitHub Actions

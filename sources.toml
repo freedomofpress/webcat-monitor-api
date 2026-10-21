@@ -12,8 +12,9 @@ credentials = "/srv/index/gcloud"
 export_snapshot = "2026-10-18T10:41:00Z"  # start of the one-time export; daily increments continue from here
 
 [api]
-bind = "0.0.0.0"
+bind = "127.0.0.1"
 port = 8080
+hostname = "monitor-api.webcat.tech"  # nginx in front, Let's Encrypt certificate (setup.sh)
 
 [[source]]
 name = "seasalp"

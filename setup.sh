@@ -34,6 +34,15 @@ for i in $(seq 1 30); do clickhouse-client -q "SELECT 1" >/dev/null 2>&1 && brea
 clickhouse-client --multiquery < /opt/webcat-monitor/schema.sql
 systemctl enable --now webcat-api webcat-monitor.timer >/dev/null 2>&1
 
+HOST=$(sed -n 's/^hostname = "\([^"]*\)".*/\1/p' "$SRC/sources.toml")
+if [ -n "$HOST" ]; then  # nginx in front of the API, certificate from Let's Encrypt
+  apt-get -qq install -y nginx certbot python3-certbot-nginx >/dev/null
+  sed "s/HOSTNAME/$HOST/" "$SRC/nginx.conf" > /etc/nginx/sites-available/webcat-monitor
+  ln -sf /etc/nginx/sites-available/webcat-monitor /etc/nginx/sites-enabled/webcat-monitor; rm -f /etc/nginx/sites-enabled/default
+  nginx -t -q && systemctl reload nginx
+  [ -e "/etc/letsencrypt/live/$HOST" ] || certbot --nginx -n --agree-tos --register-unsafely-without-email --redirect -d "$HOST"
+fi
+
 if [ -n "$KEY" ]; then
   mkdir -p /srv/index/gcloud; chmod 700 /srv/index/gcloud
   sudo -u clickhouse env CLOUDSDK_CONFIG=/srv/index/gcloud HOME=/srv/index gcloud auth activate-service-account --key-file="$KEY" >/dev/null

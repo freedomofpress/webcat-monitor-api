@@ -7,7 +7,8 @@ Sigsum offer by themselves. The [explorer](https://github.com/freedomofpress/web
 per-site history, and a `webcat audit` command for the [CLI](https://github.com/freedomofpress/webcat-cli) is in
 draft.
 
-Current sizes, latencies and endpoint examples are in [STATUS.md](STATUS.md).
+The live instance is at https://monitor-api.webcat.tech. Current sizes, latencies and endpoint examples are in
+[STATUS.md](STATUS.md).
 
 ## What it answers
 
@@ -72,5 +73,5 @@ bootstrapping. After that a systemd timer runs `monitor.py` nightly. `python3 te
 | `setup.sh`, `bootstrap.sh`, `snapshot.sh` | lifecycle |
 
 Everything runs as one unprivileged user, ClickHouse listens on localhost, the API queries through a read-only
-database user with per-query limits, and the archives are read-only files. Put the API behind TLS before giving it
-a hostname.
+database user with per-query limits, and the archives are read-only files. nginx terminates TLS with a Let's Encrypt
+certificate for the hostname in `sources.toml`.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """webcat log auditor API: read-only JSON over HTTP in front of the ClickHouse index and the Sigsum SQLite index.
 
+  GET /                 HTML: totals per log, API instructions
   GET /v1/status
   GET /v1/sigstore/history?claims[<oid>]=<value>&claims[<oid>]=<value>...[&limit=N][&before=<unix time>]
       (OpenAPI deepObject style; values URL-encoded as usual)
@@ -14,7 +15,7 @@ Claim semantics are the extension's: every claim must match, a value starting wi
 matches any SAN. Queries run as the read-only ClickHouse user "api" (capped threads, memory, time); MAX_INFLIGHT
 queries at once, a burst queues up to QUEUE_SECONDS, then 503.
 """
-import base64, hashlib, json, pathlib, re, sqlite3, threading, tomllib, urllib.parse, urllib.request
+import base64, hashlib, html, json, pathlib, re, sqlite3, threading, time, tomllib, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CH = "http://127.0.0.1:8123/?user=api&"
@@ -105,6 +106,50 @@ def route(path, qs, body=None):
         return {"digest": parts[2], "entries": with_links(ch(f"SELECT DISTINCT e.log AS log, e.log_index AS log_index, toUnixTimestamp(e.time) AS time, e.kind AS kind, e.issuer AS issuer, e.identity AS identity FROM webcat.artifact AS a INNER JOIN webcat.entries_by_index AS e USING (log, log_index) WHERE a.digest = unhex({lit(parts[2])}) LIMIT {limit}"))}
     raise Bad(404, "unknown endpoint; see /v1/status, /v1/sigstore/history, /v1/sigsum/history, /v1/entry, /v1/sha, /v1/artifact")
 
+SOURCE_URL = "https://github.com/freedomofpress/webcat-monitor-api"
+PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>WEBCAT log auditor</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:64em;margin:2em auto;padding:0 1em;color:#222}table{border-collapse:collapse}
+td,th{text-align:left;padding:.25em 1.2em .25em 0;border-bottom:1px solid #ddd}pre{background:#f4f4f4;padding:.7em;overflow-x:auto}code{background:#f4f4f4;padding:.1em .3em}</style>
+<h1>WEBCAT log auditor</h1>
+<p><b>%(total)s</b> leaves indexed from %(n)d transparency logs, verified nightly against their signed tree heads.
+Source code and documentation: <a href="%(src)s">%(src)s</a>.</p>
+<table><tr><th>Log<th>Leaves<th>Newest leaf<th>Last update<th>Verification</tr>%(rows)s</table>
+<h2>API</h2>
+<p>Read-only JSON, no authentication, cached 5 minutes. Claim semantics are the WEBCAT extension's: every claim must match,
+a value starting with <code>^</code> is a prefix, the SAN claim <code>2.5.29.17</code> matches any subject alternative name.
+Please keep it to a few requests per second; a burst gets 503 with <code>Retry-After</code>.</p>
+<pre>GET  /v1/sigstore/history?claims[&lt;oid&gt;]=&lt;value&gt;&amp;claims[&lt;oid&gt;]=&lt;value&gt;...[&amp;limit=N][&amp;before=&lt;unix time&gt;]
+POST /v1/sigstore/history          {"claims": {"&lt;oid&gt;": "&lt;value&gt;", ...}, "limit": N, "before": &lt;unix time&gt;}
+GET  /v1/sigsum/history?signer=&lt;base64url public key&gt;   or   ?key=&lt;hex sha256 of the key&gt;
+GET  /v1/entry/&lt;log&gt;/&lt;log index&gt;
+GET  /v1/sha/&lt;40 hex git commit&gt;
+GET  /v1/artifact/&lt;64 hex digest&gt;       Rekor v2 only
+GET  /v1/status                          totals and last verification per log</pre>
+<p>Examples</p>
+<pre><a href="%(ex1)s">%(ex1)s</a>
+<a href="%(ex2)s">%(ex2)s</a>
+<a href="/v1/entry/rekor-v1/3081692656">/v1/entry/rekor-v1/3081692656</a>
+<a href="/v1/status">/v1/status</a></pre>
+<p>Entries carry <code>log</code>, <code>log_index</code>, <code>time</code>, <code>kind</code>, <code>issuer</code>, <code>identity</code> and
+<code>ext</code> (the certificate's Fulcio OID claims); Rekor v1 entries link to search.sigstore.dev. Limit is 500 by default, 2000 at most;
+page with <code>before</code>.</p>
+"""
+
+def home():
+    st = route("/v1/status", "")
+    day = lambda t: time.strftime("%Y-%m-%d %H:%M", time.gmtime(t)) if t else "-"
+    def verdict(log):
+        v = st["verification"].get(log)
+        if not v: return "-"
+        ok = all(x for x in v.values() if isinstance(x, bool)) and all(s.get("verified") for s in v.get("shards", {}).values())
+        return ("verified " if ok else "FAILED ") + day(v["checked_at"])
+    rows = [(r["log"], r["url"], r["entries"], day(r["newest"]), day(st["verification"].get(r["log"], {}).get("checked_at") or r["updated"]), verdict(r["log"])) for r in st["rekor"]]
+    rows += [(s["log"], s["url"], s["size"], "-", day(s["fetched_at"]), verdict(s["log"])) for s in st["sigsum"]]
+    tr = "".join(f'<tr><td><a href="{html.escape(u)}">{html.escape(l)}</a><td>{n:,}<td>{a}<td>{b}<td>{c}</tr>' for l, u, n, a, b, c in rows)
+    ex1 = "/v1/sigstore/history?" + urllib.parse.urlencode({"claims[2.5.29.17]": "^https://github.com/freedomofpress/", "claims[1.3.6.1.4.1.57264.1.8]": "https://token.actions.githubusercontent.com", "limit": 20})
+    ex2 = "/v1/sigsum/history?signer=wzRAXpRuYr5CHZmCAdK1Jh2widMU8GOwCNhONOHkV8k"
+    return PAGE % {"total": f"{sum(r[2] for r in rows):,}", "n": len(rows), "src": SOURCE_URL, "rows": tr, "ex1": html.escape(ex1), "ex2": ex2}
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "webcat-auditor/0.1"
     def log_message(self, fmt, *args): pass
@@ -118,14 +163,15 @@ class Handler(BaseHTTPRequestHandler):
         if not inflight.acquire(timeout=QUEUE_SECONDS):
             return self.reply(503, {"error": "busy, retry shortly"}, retry=2)
         try:
-            self.reply(200, route(u.path, u.query, body))
+            if u.path == "/": self.reply(200, home(), ctype="text/html; charset=utf-8")
+            else: self.reply(200, route(u.path, u.query, body))
         except Bad as e: self.reply(e.status, {"error": e.msg}, retry=2 if e.status == 503 else None)
         except Exception as e: self.reply(500, {"error": type(e).__name__})
         finally: inflight.release()
-    def reply(self, status, obj, retry=None):
-        body = json.dumps(obj).encode()
+    def reply(self, status, obj, retry=None, ctype="application/json"):
+        body = obj.encode() if isinstance(obj, str) else json.dumps(obj).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", "public, max-age=300")
         if retry: self.send_header("Retry-After", str(retry))
         self.end_headers(); self.wfile.write(body)
