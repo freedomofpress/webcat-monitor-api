@@ -15,7 +15,8 @@ from util import ch, get, record_status
 
 SAMPLE = 200
 BUDGET = 60000              # entries per nightly repair run; the bootstrap backlog passes the full count
-TAIL_BUDGET = 50000         # entries per tail round (10 per request)
+TAIL_BUDGET = 50000         # entries per tail round
+TAIL_WORKERS = 20           # bulk retrieve answers 10 entries in ~10 s; this many in flight keeps RATE requests per second busy
 WORKERS, RATE = 2, 2.0      # Rekor answers 429/503 above a few requests per second
 NO_CERT_KINDS = ("rfc3161", "tuf")
 RANGES = pathlib.Path("/srv/index/v1_file_ranges.json")
@@ -147,7 +148,7 @@ def tail(src, paths, budget=TAIL_BUDGET):
     size = info["treeSize"] + sum(s["treeSize"] for s in info["inactiveShards"])
     idxs = range(top + 1, min(size, top + budget + 1))
     if not idxs: return 0
-    with ThreadPoolExecutor(WORKERS) as ex:
+    with ThreadPoolExecutor(TAIL_WORKERS) as ex:
         fetched = [e for batch in ex.map(lambda b: fetch_entries(url, b), [idxs[i:i + 10] for i in range(0, len(idxs), 10)]) for e in batch]
     if not fetched: return 0
     rel = f"rekor-v1/daily/live-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}/part-000000000000.parquet"
