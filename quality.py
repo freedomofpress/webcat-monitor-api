@@ -55,6 +55,7 @@ def cert_from_body(body):
     spec = body["spec"]
     pem = (spec.get("signature", {}).get("publicKey", {}).get("content") or (spec.get("signatures") or [{}])[0].get("verifier")
            or spec.get("publicKey") or spec.get("content", {}).get("publicKey"))
+    if isinstance(pem, dict): pem = pem.get("content")   # alpine, rpm, helm: {"content": ...}
     if not pem: return None
     raw = base64.b64decode(pem)
     return x509.load_pem_x509_certificate(raw) if b"BEGIN CERTIFICATE" in raw else None
@@ -176,7 +177,7 @@ def _repair_file(url, paths, rel, lo, hi, missing):
        f"max_threads = 1, max_memory_usage = 1500000000, input_format_parquet_use_native_reader = 1 "
        f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN (SELECT LogIndex FROM webcat.stage_repair) AND {PLACEHOLDER}) "
        f"UNION ALL SELECT * FROM file({repl!r}, Parquet, {STRUCT!r})")
-    old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) FORMAT TSV").strip()) for f in (rel, tmp))
+    old, new = (int(ch(f"SELECT count() FROM file({f!r}, Parquet) SETTINGS use_cache_for_count_from_files = 0 FORMAT TSV").strip()) for f in (rel, tmp))
     added = sum(1 for _, v in fetched if v["logIndex"] in absent)
     if new != old + added: raise RuntimeError(f"{rel}: row count {old} -> {new}, expected {old + added}, not replacing")
     os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444); os.chmod(d, 0o555)

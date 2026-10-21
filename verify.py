@@ -2,7 +2,7 @@
 Rekor v1 signed tree heads, and the Rekor v1 leaf-list check. Keys are pinned in sources.toml; a signature that
 does not verify is an error, never a warning. python3-cryptography is imported lazily so the Merkle half and the
 offline tests need only the stdlib."""
-import base64, hashlib, json, logging, pathlib, struct, urllib.parse, urllib.request
+import base64, fcntl, hashlib, json, logging, pathlib, struct, urllib.parse, urllib.request
 from util import get, record_status
 
 # --- Merkle -----------------------------------------------------------------------------------------------------
@@ -147,6 +147,9 @@ def rekor_v1_leaves(src, paths, max_gap=10000):
     """Entries the dataset lacks are fetched from the live log and added to their export file as they are met, up to
     max_gap consecutive indices; a larger hole is reported and stops the check at the last good index."""
     import quality
+    lock = open("/run/lock/webcat-v1verify.lock", "w")   # one leaf-list check at a time (nightly vs backlog)
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError: logging.info("rekor-v1: another leaf-list check is running, skipping"); return
     url = src["url"].rstrip("/")
     state = json.loads(FRONTIER.read_text()) if FRONTIER.exists() else {"next_index": 0, "order": [], "shards": {}}
     shards = {k: Frontier.load(v) for k, v in state["shards"].items()}
