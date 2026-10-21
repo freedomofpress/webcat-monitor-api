@@ -72,6 +72,6 @@ Consumers (both in draft, not merged): a `webcat audit <domain>` command for web
 
 ## Limits
 
-- Rekor v1: the dataset refreshes irregularly (9 days behind today); the newest entries come from the live log instead, at ~20 entries/s, so the index trails by minutes once the backlog is fetched.
+- Rekor v1 trails the live log by the dataset's refresh lag: irregular, 9 days today (last refresh 2026-10-16 with data to 2026-10-12). The live API cannot close it: ~20 entries/s at a polite rate against ~15 M new entries a day. A site's current bundle carries its own log index, so a client can merge the newest entry itself.
 - v1 content cannot be hash-verified (no leaf bodies in the dataset), hence the daily sampling.
 - v2 witness cosignatures not yet verified (no pinned witness keys).

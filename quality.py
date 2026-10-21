@@ -1,7 +1,6 @@
 """Rekor v1 content quality, since the dataset has no leaf bodies to hash:
 - sample(): fetch random entries from the live log, confirm the leaf hash we hold, parse the certificate the way
   the v2 extractor does, compare identity, issuer and claims with the index.
-- tail(): entries newer than the dataset, from the live log, until its next refresh catches up.
 - repair(): entries the dataset left without an identity although they carry a certificate (~2.56M, mostly 2024
   DSSE) get it from the live log. The export file is rewritten in place in its own schema (temp file, rename), the
   file's rows are refreshed in the index. Entries with no certificate are marked IdentityGoType = "none" so they
@@ -15,8 +14,6 @@ from util import ch, get, record_status
 
 SAMPLE = 200
 BUDGET = 60000              # entries per nightly repair run; the bootstrap backlog passes the full count
-TAIL_BUDGET = 50000         # entries per tail round
-TAIL_WORKERS = 20           # bulk retrieve answers 10 entries in ~10 s; this many in flight keeps RATE requests per second busy
 WORKERS, RATE = 2, 2.0      # Rekor answers 429/503 above a few requests per second
 NO_CERT_KINDS = ("rfc3161", "tuf")
 RANGES = pathlib.Path("/srv/index/v1_file_ranges.json")
@@ -138,26 +135,6 @@ def stage_export(rows, archive, rel):
        "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
        "arrayMap(x -> (x.1, unhex(x.2), x.3), ExtHex), SANExtensionURIs, SANExtensionEmailAddresses, [], [] FROM webcat.stage_repair")
 
-def tail(src, paths, budget=TAIL_BUDGET):
-    """Entries newer than the archive holds, 10 per request from the live log, archived under rekor-v1/daily/live-<tag>/
-    and loaded. The dataset's increments skip indices already held (load_v1.sql), so the two never overlap."""
-    url = src["url"].rstrip("/")
-    top = int(ch("SELECT log_index FROM webcat.leaves_v1 ORDER BY log_index DESC LIMIT 1 FORMAT TSV").strip() or 0)
-    if not top: return 0
-    info = json.loads(get(url + "/api/v1/log").decode())
-    size = info["treeSize"] + sum(s["treeSize"] for s in info["inactiveShards"])
-    idxs = range(top + 1, min(size, top + budget + 1))
-    if not idxs: return 0
-    with ThreadPoolExecutor(TAIL_WORKERS) as ex:
-        fetched = [e for batch in ex.map(lambda b: fetch_entries(url, b), [idxs[i:i + 10] for i in range(0, len(idxs), 10)]) for e in batch]
-    if not fetched: return 0
-    rel = f"rekor-v1/daily/live-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}/part-000000000000.parquet"
-    stage_export([export_row(u, v)[0] for u, v in fetched], paths["archive"], rel)
-    f = paths["archive"] / rel; f.chmod(0o444); f.parent.chmod(0o555)
-    load_file(rel)
-    logging.info("rekor-v1 tail: %d entries %d..%d from the live log (log size %d)", len(fetched), idxs[0], idxs[-1], size)
-    return len(fetched)
-
 def file_ranges(paths):
     """{relative file: [min, max LogIndex]} for every v1 Parquet in the archive, from the footers; cached, empty files skipped."""
     cached = json.loads(RANGES.read_text()) if RANGES.exists() else {}
@@ -259,9 +236,4 @@ if __name__ == "__main__":
     src = next(s for s in cfg["source"] if s["type"] == "rekor-v1")
     if sys.argv[1:2] == ["sample"]: sample(src)
     elif sys.argv[1:2] == ["repair"]: repair(src, paths, int(sys.argv[2]) if len(sys.argv) > 2 else BUDGET)
-    elif sys.argv[1:2] == ["tail"]:   # service: keep the archive within minutes of the live log
-        while True:
-            n = tail(src, paths)
-            if n: ch("INSERT INTO webcat.stats SELECT log, count(), max(time), now() FROM webcat.entries WHERE log = 'rekor-v1' GROUP BY log SETTINGS max_threads = 2")
-            if n < TAIL_BUDGET: time.sleep(600)
-    else: print("usage: quality.py sample | repair [budget] | tail")
+    else: print("usage: quality.py sample | repair [budget]")

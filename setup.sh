@@ -27,12 +27,12 @@ rsync -a --delete --exclude .git --exclude __pycache__ "$SRC/" /opt/webcat-monit
 chown -R clickhouse:clickhouse /opt/webcat-monitor
 install -m 644 "$SRC/clickhouse.xml" /etc/clickhouse-server/config.d/webcat.xml
 install -m 644 "$SRC/clickhouse-users.xml" /etc/clickhouse-server/users.d/webcat.xml
-install -m 644 "$SRC/clickhouse-server.service" "$SRC/webcat-api.service" "$SRC/webcat-monitor.service" "$SRC/webcat-monitor.timer" "$SRC/webcat-v1tail.service" /etc/systemd/system/
+install -m 644 "$SRC/clickhouse-server.service" "$SRC/webcat-api.service" "$SRC/webcat-monitor.service" "$SRC/webcat-monitor.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now clickhouse-server >/dev/null 2>&1
 for i in $(seq 1 30); do clickhouse-client -q "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
 clickhouse-client --multiquery < /opt/webcat-monitor/schema.sql
-systemctl enable --now webcat-api webcat-monitor.timer webcat-v1tail >/dev/null 2>&1
+systemctl enable --now webcat-api webcat-monitor.timer >/dev/null 2>&1
 
 HOST=$(sed -n 's/^hostname = "\([^"]*\)".*/\1/p' "$SRC/sources.toml")
 if [ -n "$HOST" ]; then  # nginx in front of the API, certificate from Let's Encrypt

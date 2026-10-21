@@ -32,9 +32,9 @@ Answers are JSON. Claim queries are key-range lookups and take milliseconds on 3
   extracted to an archive, the bundle is dropped.
 - **Rekor v1**: Google's public BigQuery dataset of the log. The v1 API serves one entry per request and the log
   holds over three billion, so the history comes from a one-time export and daily `APPENDS` increments. The dataset
-  runs days behind the log, so a service fetches the newest entries from the live API, ten per request, until each
-  increment catches up. The dataset has no leaf bodies and some gaps; the live API is also used to sample it daily and
-  to fill what it lacks.
+  refreshes irregularly, days behind the log, and the live API (about twenty entries per second at a polite rate,
+  against fifteen million new entries a day) cannot stand in for it. It has no leaf bodies and some gaps; the live
+  API is used to sample it daily and to fill what it lacks.
 
 Everything lands in two volumes: the archives on an HDD, written once and read-only, and a ClickHouse index on an
 NVMe that is a projection of them. The index can be rebuilt from the archives at any time.
@@ -60,7 +60,7 @@ sudo -u clickhouse ./bootstrap.sh            # the history from the endpoints: a
 ```
 
 or, from an existing deployment, `./snapshot.sh make <dest>` there and `./snapshot.sh restore <src>` here instead of
-bootstrapping. After that a systemd timer runs `monitor.py` nightly and a service keeps the Rekor v1 tail current. `python3 test.py` runs the offline checks.
+bootstrapping. After that a systemd timer runs `monitor.py` nightly. `python3 test.py` runs the offline checks.
 
 ## Code
 
@@ -69,7 +69,7 @@ bootstrapping. After that a systemd timer runs `monitor.py` nightly and a servic
 | `sources.toml` | the configuration: volumes, GCP project, API bind, logs and their keys |
 | `monitor.py` | nightly entry point; `sigsum.py`, `rekor_v2.py`, `rekor_v1.py` fetch and load one log type each |
 | `verify.py` | Merkle trees and proofs, signed notes and checkpoints, Sigsum and Rekor tree heads |
-| `quality.py` | Rekor v1 from the live log: the tail ahead of the dataset, daily sampling, in-place repair of the dataset's gaps |
+| `quality.py` | live sampling of Rekor v1, and the in-place repair of the dataset's gaps |
 | `build.py`, `load_v1.sql`, `load_v2.sql`, `schema.sql` | the index |
 | `api.py` | the API |
 | `setup.sh`, `bootstrap.sh`, `snapshot.sh` | lifecycle |
