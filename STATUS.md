@@ -59,6 +59,9 @@ POST /v1/sigstore/history
 # a Sigsum signer's leaves in the enrolled logs
 GET /v1/sigsum/history?signer=wzRAXpRuYr5CHZmCAdK1Jh2widMU8GOwCNhONOHkV8k
 
+# paging: answers carry the real total; a truncated answer carries a cursor for the next page
+GET /v1/sigstore/history?claims[2.5.29.17]=^https://github.com/freedomofpress/&limit=100&cursor=<cursor from the previous answer>
+
 GET /v1/entry/rekor-v1/3081692656
 GET /v1/sha/06e0a2a35efa7c4b6c8771e080a805ed3bf72dd6
 GET /v1/artifact/4f0a230f351e315bef22714ff5f85798c9103fba7c66f87e76942d8fcb33e8ee
@@ -69,6 +72,6 @@ Consumers (both in draft, not merged): a `webcat audit <domain>` command for web
 
 ## Limits
 
-- Rekor v1 trails the live log by the dataset's refresh lag (8 days today); v2 is current to the hour.
+- Rekor v1: the dataset refreshes irregularly (9 days behind today); the newest entries come from the live log instead, at ~20 entries/s, so the index trails by minutes once the backlog is fetched.
 - v1 content cannot be hash-verified (no leaf bodies in the dataset), hence the daily sampling.
 - v2 witness cosignatures not yet verified (no pinned witness keys).

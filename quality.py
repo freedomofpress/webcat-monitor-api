@@ -1,6 +1,7 @@
 """Rekor v1 content quality, since the dataset has no leaf bodies to hash:
 - sample(): fetch random entries from the live log, confirm the leaf hash we hold, parse the certificate the way
   the v2 extractor does, compare identity, issuer and claims with the index.
+- tail(): entries newer than the dataset, from the live log, until its next refresh catches up.
 - repair(): entries the dataset left without an identity although they carry a certificate (~2.56M, mostly 2024
   DSSE) get it from the live log. The export file is rewritten in place in its own schema (temp file, rename), the
   file's rows are refreshed in the index. Entries with no certificate are marked IdentityGoType = "none" so they
@@ -9,10 +10,12 @@
 import base64, fcntl, hashlib, json, logging, os, pathlib, random, subprocess, threading, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from rekor_v2 import record
+from rekor_v1 import load_file
 from util import ch, get, record_status
 
 SAMPLE = 200
 BUDGET = 60000              # entries per nightly repair run; the bootstrap backlog passes the full count
+TAIL_BUDGET = 50000         # entries per tail round (10 per request)
 WORKERS, RATE = 2, 2.0      # Rekor answers 429/503 above a few requests per second
 NO_CERT_KINDS = ("rfc3161", "tuf")
 RANGES = pathlib.Path("/srv/index/v1_file_ranges.json")
@@ -27,11 +30,11 @@ PLACEHOLDER = ("ifNull(Issuer, '') = '' AND length(Extensions) = 0 AND length(SA
                "AND length(Digests) = 0 AND length(PGPIdentities) = 0 AND ifNull(IdentityGoType, '') != 'none'")
 _gate, _last = threading.Lock(), [0.0]
 
-def fetch_entry(url, idx):
-    """One live entry (uuid, entry) at most RATE requests per second overall; waits through 429/503; None if the log
-    will not serve it."""
-    from cryptography import x509  # noqa: F401  (import check only; parsing happens in cert_from_body)
-    req = urllib.request.Request(f"{url}/api/v1/log/entries?logIndex={idx}", headers={"User-Agent": "webcat-monitor (log auditor, contact: webcat@freedom.press)"})
+def fetch_entries(url, idxs):
+    """Live entries [(uuid, entry)] for up to 10 log indices in one request, at most RATE requests per second overall;
+    waits through 429/503; indices the log will not serve are left out."""
+    req = urllib.request.Request(f"{url}/api/v1/log/entries/retrieve", data=json.dumps({"logIndexes": list(idxs)}).encode(),
+                                 headers={"User-Agent": "webcat-monitor (log auditor, contact: webcat@freedom.press)", "Content-Type": "application/json"})
     for n in range(200):
         with _gate:
             wait = _last[0] + 1.0 / RATE - time.monotonic()
@@ -39,15 +42,17 @@ def fetch_entry(url, idx):
             _last[0] = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
-                return next(iter(json.loads(r.read()).items()))
+                return [next(iter(e.items())) for e in json.loads(r.read())]
         except urllib.error.HTTPError as e:
             if e.code in (429, 503): time.sleep(min(float(e.headers.get("Retry-After", 60)), 300)); continue
-            if n >= 4: logging.warning("rekor-v1: index %d: HTTP %d after %d tries, skipped", idx, e.code, n + 1); return None
+            if n >= 4: logging.warning("rekor-v1: %s: HTTP %d after %d tries, skipped", list(idxs), e.code, n + 1); return []
             time.sleep(2 ** n)
         except Exception as e:
-            if n >= 9: logging.warning("rekor-v1: index %d: %s, skipped", idx, e); return None
+            if n >= 9: logging.warning("rekor-v1: %s: %s, skipped", list(idxs), e); return []
             time.sleep(2 ** n)
-    return None
+    return []
+
+def fetch_entry(url, idx): return next(iter(fetch_entries(url, [idx])), None)
 
 def cert_from_body(body):
     """The signer certificate of a v1 entry body (hashedrekord, rekord, dsse, intoto), or None."""
@@ -118,6 +123,40 @@ def export_row(uuid, v):
             row["ExtHex"].append([oid, raw.hex(), e.critical])
     return row, True
 
+def stage_export(rows, archive, rel):
+    """Rows in the export's own schema -> stage_repair -> a zstd Parquet file at archive/rel (replaced if present)."""
+    ch("CREATE TABLE IF NOT EXISTS webcat.stage_repair (LogIndex Int64, IntegratedTime DateTime64(6, 'UTC'), Kind String, EntryUUIDHex String, "
+       "IdentityGoType String, Issuer String, NotBefore DateTime64(6, 'UTC'), ExtHex Array(Tuple(String, String, Bool)), "
+       "SANExtensionURIs Array(String), SANExtensionEmailAddresses Array(String)) ENGINE = Memory")
+    ch("TRUNCATE TABLE webcat.stage_repair")
+    ch("INSERT INTO webcat.stage_repair FORMAT JSONEachRow", "\n".join(json.dumps(r) for r in rows).encode())
+    f = archive / rel
+    f.parent.mkdir(parents=True, exist_ok=True); os.chmod(f.parent, 0o755)
+    if f.exists(): f.unlink()
+    ch(f"INSERT INTO FUNCTION file({rel!r}, 'Parquet', {STRUCT!r}) SETTINGS output_format_parquet_compression_method = 'zstd' "
+       "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
+       "arrayMap(x -> (x.1, unhex(x.2), x.3), ExtHex), SANExtensionURIs, SANExtensionEmailAddresses, [], [] FROM webcat.stage_repair")
+
+def tail(src, paths, budget=TAIL_BUDGET):
+    """Entries newer than the archive holds, 10 per request from the live log, archived under rekor-v1/daily/live-<tag>/
+    and loaded. The dataset's increments skip indices already held (load_v1.sql), so the two never overlap."""
+    url = src["url"].rstrip("/")
+    top = int(ch("SELECT log_index FROM webcat.leaves_v1 ORDER BY log_index DESC LIMIT 1 FORMAT TSV").strip() or 0)
+    if not top: return 0
+    info = json.loads(get(url + "/api/v1/log").decode())
+    size = info["treeSize"] + sum(s["treeSize"] for s in info["inactiveShards"])
+    idxs = range(top + 1, min(size, top + budget + 1))
+    if not idxs: return 0
+    with ThreadPoolExecutor(WORKERS) as ex:
+        fetched = [e for batch in ex.map(lambda b: fetch_entries(url, b), [idxs[i:i + 10] for i in range(0, len(idxs), 10)]) for e in batch]
+    if not fetched: return 0
+    rel = f"rekor-v1/daily/live-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}/part-000000000000.parquet"
+    stage_export([export_row(u, v)[0] for u, v in fetched], paths["archive"], rel)
+    f = paths["archive"] / rel; f.chmod(0o444); f.parent.chmod(0o555)
+    load_file(rel)
+    logging.info("rekor-v1 tail: %d entries %d..%d from the live log (log size %d)", len(fetched), idxs[0], idxs[-1], size)
+    return len(fetched)
+
 def file_ranges(paths):
     """{relative file: [min, max LogIndex]} for every v1 Parquet in the archive, from the footers; cached, empty files skipped."""
     cached = json.loads(RANGES.read_text()) if RANGES.exists() else {}
@@ -160,19 +199,11 @@ def _repair_file(url, paths, rel, lo, hi, missing):
     with ThreadPoolExecutor(WORKERS) as ex: fetched = [f for f in ex.map(lambda i: fetch_entry(url, i), present) if f]
     if not fetched: return 0, 0
     rows = [export_row(uuid, v) for uuid, v in fetched]
-    ch("CREATE TABLE IF NOT EXISTS webcat.stage_repair (LogIndex Int64, IntegratedTime DateTime64(6, 'UTC'), Kind String, EntryUUIDHex String, "
-       "IdentityGoType String, Issuer String, NotBefore DateTime64(6, 'UTC'), ExtHex Array(Tuple(String, String, Bool)), "
-       "SANExtensionURIs Array(String), SANExtensionEmailAddresses Array(String)) ENGINE = Memory")
-    ch("TRUNCATE TABLE webcat.stage_repair")
-    ch("INSERT INTO webcat.stage_repair FORMAT JSONEachRow", "\n".join(json.dumps(r) for r, _ in rows).encode())
     repl, tmp = "rekor-v1/repair.tmp.parquet", rel + ".tmp"
     a = paths["archive"]; d = (a / rel).parent
-    for stale in (a / repl, a / tmp):
-        if stale.exists(): stale.unlink()
+    stage_export([r for r, _ in rows], a, repl)
+    if (a / tmp).exists(): (a / tmp).unlink()
     os.chmod(d, 0o755)
-    ch(f"INSERT INTO FUNCTION file({repl!r}, 'Parquet', {STRUCT!r}) SETTINGS output_format_parquet_compression_method = 'zstd' "
-       "SELECT LogIndex, IntegratedTime, Kind, unhex(EntryUUIDHex), IdentityGoType, '', Issuer, NotBefore, "
-       "arrayMap(x -> (x.1, unhex(x.2), x.3), ExtHex), SANExtensionURIs, SANExtensionEmailAddresses, [], [] FROM webcat.stage_repair")
     ch(f"INSERT INTO FUNCTION file({tmp!r}, 'Parquet', {STRUCT!r}) SETTINGS output_format_parquet_compression_method = 'zstd', "
        f"max_threads = 1, max_memory_usage = 1500000000, input_format_parquet_use_native_reader = 1 "
        f"SELECT * FROM file({rel!r}, Parquet, {STRUCT!r}) WHERE NOT (LogIndex IN (SELECT LogIndex FROM webcat.stage_repair) AND {PLACEHOLDER}) "
@@ -182,7 +213,7 @@ def _repair_file(url, paths, rel, lo, hi, missing):
     if new != old + added: raise RuntimeError(f"{rel}: row count {old} -> {new}, expected {old + added}, not replacing")
     os.replace(a / tmp, a / rel); os.chmod(a / rel, 0o444); os.chmod(d, 0o555)
     replace_index_rows()
-    subprocess.run(["clickhouse-client", f"--param_file={repl}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
+    load_file(repl, reload=True)
     (a / repl).unlink()
     return len(fetched), sum(1 for _, ok in rows if ok)
 
@@ -227,4 +258,9 @@ if __name__ == "__main__":
     src = next(s for s in cfg["source"] if s["type"] == "rekor-v1")
     if sys.argv[1:2] == ["sample"]: sample(src)
     elif sys.argv[1:2] == ["repair"]: repair(src, paths, int(sys.argv[2]) if len(sys.argv) > 2 else BUDGET)
-    else: print("usage: quality.py sample | repair [budget]")
+    elif sys.argv[1:2] == ["tail"]:   # service: keep the archive within minutes of the live log
+        while True:
+            n = tail(src, paths)
+            if n: ch("INSERT INTO webcat.stats SELECT log, count(), max(time), now() FROM webcat.entries WHERE log = 'rekor-v1' GROUP BY log SETTINGS max_threads = 2")
+            if n < TAIL_BUDGET: time.sleep(600)
+    else: print("usage: quality.py sample | repair [budget] | tail")

@@ -3,10 +3,11 @@
 
   GET /                 HTML: totals per log, API instructions
   GET /v1/status
-  GET /v1/sigstore/history?claims[<oid>]=<value>&claims[<oid>]=<value>...[&limit=N][&before=<unix time>]
+  GET /v1/sigstore/history?claims[<oid>]=<value>&claims[<oid>]=<value>...[&limit=N][&before=<unix time>][&cursor=C]
       (OpenAPI deepObject style; values URL-encoded as usual)
-  POST /v1/sigstore/history   body: {"claims": {<oid>: <value>, ...}, "limit": N, "before": <unix time>}
-  GET /v1/sigsum/history?key=<hex sha256 of the signer public key>  |  ?signer=<base64url public key>
+  POST /v1/sigstore/history   body: {"claims": {<oid>: <value>, ...}, "limit": N, "before": <unix time>, "cursor": C}
+  GET /v1/sigsum/history?key=<hex sha256 of the signer public key>  |  ?signer=<base64url public key>  [&cursor=C]
+  Answers carry the real total; when truncated, "cursor" fetches the next page (opaque, pass it back as is).
   GET /v1/entry/<log>/<log index>
   GET /v1/sha/<40 hex>          git commit SHA -> entries
   GET /v1/artifact/<64 hex>     artifact digest -> entries (Rekor v2 only)
@@ -48,7 +49,7 @@ def ch(sql):
         body = e.read().decode(errors="replace")
         raise Bad(503 if "MEMORY_LIMIT" in body or "TIMEOUT" in body or "TOO_MANY" in body else 500, (re.search(r"Code: \d+\. [^\n]{0,160}", body) or [body[:160]])[0])
 
-def history_sql(claims, limit, before):
+def history_where(claims, before, cursor):
     if not isinstance(claims, dict) or not claims or len(claims) > 16: raise Bad(400, "claims must be an object of 1 to 16 OID: value pairs")
     for k, v in claims.items():
         if not OID_RE.match(k) or not isinstance(v, str) or not 0 < len(v) <= 512: raise Bad(400, f"bad claim {k!r}")
@@ -63,8 +64,11 @@ def history_sql(claims, limit, before):
                 where.append(f"identity IN (SELECT identity FROM webcat.claims WHERE oid = {lit(oid)} AND {sub})")
             where.append(f"has(mapKeys(ext), {lit(oid)}) AND {match(f'ext[{lit(oid)}]', v)}")
     if before: where.append(f"time < toDateTime({int(before)})")
-    return (f"SELECT log, log_index, toUnixTimestamp(time) AS time, kind, issuer, identity, ext FROM webcat.entries "
-            f"WHERE {' AND '.join(where)} ORDER BY time DESC LIMIT {limit}")
+    if cursor:
+        try: t, i, l = cursor.split(":", 2); t, i = int(t), int(i)
+        except ValueError: raise Bad(400, "bad cursor")
+        where.append(f"(time, log, log_index) < (toDateTime({t}), {lit(l)}, {i})")
+    return " AND ".join(where)
 
 def with_links(rows):
     for r in rows:
@@ -75,7 +79,7 @@ def with_links(rows):
 def route(path, qs, body=None):
     q = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
     if body:
-        q.update({k: v for k, v in body.items() if k in ("limit", "before")})
+        q.update({k: v for k, v in body.items() if k in ("limit", "before", "cursor")})
     limit = min(int(q.get("limit", LIMIT)), MAX_LIMIT)
     parts = path.strip("/").split("/")
     if parts == ["v1", "status"]:
@@ -88,15 +92,22 @@ def route(path, qs, body=None):
     if parts == ["v1", "sigstore", "history"]:
         claims = body.get("claims") if body else {m.group(1): v[0] for k, v in urllib.parse.parse_qs(qs).items() if (m := re.match(r"^claims\[([0-9.]+)\]$", k))}
         if not claims: raise Bad(400, "no claims: pass claims[<oid>]=<value> query parameters, or POST {\"claims\": {...}}")
-        rows = with_links(ch(history_sql(claims, limit, q.get("before"))))
-        return {"claims": claims, "total": len(rows), "truncated": len(rows) == limit, "entries": rows}
+        before, cursor = q.get("before"), q.get("cursor")
+        rows = with_links(ch(f"SELECT log, log_index, toUnixTimestamp(time) AS time, kind, issuer, identity, ext FROM webcat.entries "
+                             f"WHERE {history_where(claims, before, cursor)} ORDER BY time DESC, log DESC, log_index DESC LIMIT {limit}"))
+        more = len(rows) == limit
+        total = int(ch(f"SELECT count() AS n FROM webcat.entries WHERE {history_where(claims, before, None)}")[0]["n"]) if more or cursor else len(rows)
+        return {"claims": claims, "total": total, "truncated": more, "cursor": f"{rows[-1]['time']}:{rows[-1]['log_index']}:{rows[-1]['log']}" if more else None, "entries": rows}
     if parts == ["v1", "sigsum", "history"]:
         key = q.get("key") or (hashlib.sha256(base64.urlsafe_b64decode(q["signer"] + "=" * (-len(q["signer"]) % 4))).hexdigest() if q.get("signer") else None)
         if not key or not re.match(r"^[0-9a-f]{64}$", key): raise Bad(400, "key must be 64 hex chars, or pass signer=<base64url public key>")
         db = sqlite3.connect(f"file:{SIGSUM_DB}?mode=ro", uri=True)
-        rows = db.execute("SELECT log, idx, hex(checksum) FROM leaves WHERE key_hash = ? ORDER BY log, idx LIMIT ?", (bytes.fromhex(key), limit)).fetchall()
+        try: cl, ci = q["cursor"].rsplit(":", 1) if q.get("cursor") else ("", -1); ci = int(ci)
+        except ValueError: raise Bad(400, "bad cursor")
+        rows = db.execute("SELECT log, idx, hex(checksum) FROM leaves WHERE key_hash = ? AND (log, idx) > (?, ?) ORDER BY log, idx LIMIT ?", (bytes.fromhex(key), cl, ci, limit)).fetchall()
+        total = db.execute("SELECT count(*) FROM leaves WHERE key_hash = ?", (bytes.fromhex(key),)).fetchone()[0]
         url = lambda l: SOURCES.get(l, {}).get("url", "").rstrip("/")
-        return {"key_hash": key, "total": len(rows), "truncated": len(rows) == limit,
+        return {"key_hash": key, "total": total, "truncated": len(rows) == limit, "cursor": f"{rows[-1][0]}:{rows[-1][1]}" if len(rows) == limit else None,
                 "leaves": [{"log": l, "index": i, "checksum": c.lower(), "leaf_url": f"{url(l)}/get-leaves/{i}/{i + 1}" if url(l) else None} for l, i, c in rows]}
     if len(parts) == 4 and parts[:2] == ["v1", "entry"] and parts[3].isdigit():
         return {"entries": with_links(ch(f"SELECT DISTINCT log, log_index, toUnixTimestamp(time) AS time, kind, issuer, identity, ext FROM webcat.entries_by_index WHERE log = {lit(parts[2])} AND log_index = {int(parts[3])}"))}
@@ -118,9 +129,9 @@ Source code and documentation: <a href="%(src)s">%(src)s</a>.</p>
 <p>Read-only JSON, no authentication, cached 5 minutes. Claim semantics are the WEBCAT extension's: every claim must match,
 a value starting with <code>^</code> is a prefix, the SAN claim <code>2.5.29.17</code> matches any subject alternative name.
 Please keep it to a few requests per second; a burst gets 503 with <code>Retry-After</code>.</p>
-<pre>GET  /v1/sigstore/history?claims[&lt;oid&gt;]=&lt;value&gt;&amp;claims[&lt;oid&gt;]=&lt;value&gt;...[&amp;limit=N][&amp;before=&lt;unix time&gt;]
-POST /v1/sigstore/history          {"claims": {"&lt;oid&gt;": "&lt;value&gt;", ...}, "limit": N, "before": &lt;unix time&gt;}
-GET  /v1/sigsum/history?signer=&lt;base64url public key&gt;   or   ?key=&lt;hex sha256 of the key&gt;
+<pre>GET  /v1/sigstore/history?claims[&lt;oid&gt;]=&lt;value&gt;&amp;claims[&lt;oid&gt;]=&lt;value&gt;...[&amp;limit=N][&amp;before=&lt;unix time&gt;][&amp;cursor=C]
+POST /v1/sigstore/history          {"claims": {"&lt;oid&gt;": "&lt;value&gt;", ...}, "limit": N, "before": &lt;unix time&gt;, "cursor": C}
+GET  /v1/sigsum/history?signer=&lt;base64url public key&gt;   or   ?key=&lt;hex sha256 of the key&gt;   [&amp;cursor=C]
 GET  /v1/entry/&lt;log&gt;/&lt;log index&gt;
 GET  /v1/sha/&lt;40 hex git commit&gt;
 GET  /v1/artifact/&lt;64 hex digest&gt;       Rekor v2 only
@@ -131,8 +142,8 @@ GET  /v1/status                          totals and last verification per log</p
 <a href="/v1/entry/rekor-v1/3081692656">/v1/entry/rekor-v1/3081692656</a>
 <a href="/v1/status">/v1/status</a></pre>
 <p>Entries carry <code>log</code>, <code>log_index</code>, <code>time</code>, <code>kind</code>, <code>issuer</code>, <code>identity</code> and
-<code>ext</code> (the certificate's Fulcio OID claims); Rekor v1 entries link to search.sigstore.dev. Limit is 500 by default, 2000 at most;
-page with <code>before</code>.</p>
+<code>ext</code> (the certificate's Fulcio OID claims); Rekor v1 entries link to search.sigstore.dev. Answers carry the real
+<code>total</code>; limit is 500 by default, 2000 at most, and a truncated answer carries a <code>cursor</code> for the next page.</p>
 """
 
 def home():

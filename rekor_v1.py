@@ -37,9 +37,12 @@ def gcp(cfg):
     bq = lambda *a: run("bq", f"--project_id={g['project']}", "--location=US", *a)
     return g, run, bq
 
-def load_file(rel):
-    """Load one v1 Parquet file through load_v1.sql (stage table, fan-out to every table)."""
-    subprocess.run(["clickhouse-client", f"--param_file={rel}", "--multiquery"], input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
+def load_file(rel, reload=False):
+    """Load one v1 Parquet file through load_v1.sql (stage table, fan-out to every table). Log indices the index
+    already holds are skipped unless reload (the repair, which drops them first)."""
+    lo, hi = ch(f"SELECT ifNull(min(LogIndex), 0), ifNull(max(LogIndex), 0) FROM file({rel!r}, Parquet) FORMAT TSV").split()
+    subprocess.run(["clickhouse-client", f"--param_file={rel}", f"--param_lo={lo}", f"--param_hi={hi}", f"--param_reload={int(reload)}", "--multiquery"],
+                   input=pathlib.Path(__file__).with_name("load_v1.sql").read_text(), text=True, check=True, capture_output=True)
 
 def fetch(src, paths):
     """Daily increment."""
@@ -99,7 +102,7 @@ def load_history(cfg, paths):
         ch("DROP TABLE IF EXISTS webcat.staging"); ch("CREATE TABLE webcat.staging AS webcat.entries")
         sql = pathlib.Path(__file__).with_name("load_v1.sql").read_text().split("INSERT INTO webcat.entries SELECT")[0].replace("INSERT INTO webcat.stage_v1", "INSERT INTO webcat.staging")
         for attempt in range(20):
-            try: subprocess.run(["clickhouse-client", f"--param_file={rel}", "--multiquery"], input=sql, text=True, check=True, capture_output=True); break
+            try: subprocess.run(["clickhouse-client", f"--param_file={rel}", "--param_lo=0", "--param_hi=0", "--param_reload=1", "--multiquery"], input=sql, text=True, check=True, capture_output=True); break
             except subprocess.CalledProcessError:
                 if attempt == 19: raise
                 __import__("time").sleep(30)

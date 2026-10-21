@@ -1,6 +1,8 @@
 -- One Rekor v1 export file -> stage_v1 -> entries, entries_by_index, entries_by_time, claims, sha, leaves_v1.
--- Parameter: {file:String} path under the archive volume. Same identity/issuer/ext rules as load_v2.sql; the raw SAN
--- (kept by the export where the dataset's SAN columns are empty) yields the identity when it is a URI or email.
+-- Parameters: {file:String} path under the archive volume; {lo}, {hi} its log index range, inside which indices already
+-- in leaves_v1 are skipped (the live tail and the dataset's increments overlap) unless {reload} = 1. Same identity/issuer/ext
+-- rules as load_v2.sql; the raw SAN (kept by the export where the dataset's SAN columns are empty) yields the identity when
+-- it is a URI or email.
 SET max_threads = 1, input_format_parquet_use_native_reader = 1, input_format_parquet_max_block_size = 4096, max_insert_block_size = 65536, min_insert_block_size_rows = 65536;
 
 -- (length, header bytes) of the DER TLV whose length byte is at offset i; lengths clamped to the input so that
@@ -38,7 +40,8 @@ FROM (
     mapFromArrays(arrayMap(x -> ifNull(x.1, ''), Extensions), arrayMap(x -> derText(ifNull(x.2, '')), Extensions)) AS m
   FROM file({file:String}, Parquet)
 )
-WHERE LogIndex IS NOT NULL;
+WHERE LogIndex IS NOT NULL
+  AND ({reload:UInt8} = 1 OR LogIndex NOT IN (SELECT log_index FROM webcat.leaves_v1 WHERE log_index BETWEEN {lo:UInt64} AND {hi:UInt64}));
 
 INSERT INTO webcat.entries SELECT * FROM webcat.stage_v1;
 

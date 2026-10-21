@@ -1,0 +1,21 @@
+[Unit]
+Description=webcat-monitor: keep Rekor v1 within minutes of the live log, ahead of the dataset
+After=network-online.target clickhouse-server.service srv-index.mount srv-archive.mount
+
+[Service]
+User=clickhouse
+Group=clickhouse
+WorkingDirectory=/opt/webcat-monitor
+ExecStart=/usr/bin/python3 /opt/webcat-monitor/quality.py tail
+Restart=always
+RestartSec=60
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/srv/index /srv/archive
+
+[Install]
+WantedBy=multi-user.target
