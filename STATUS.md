@@ -22,7 +22,7 @@ Follow-up for freedomofpress/webcat#222.
 
 Growth: ~35 M entries/day across both Rekor logs, ~0.5 GB/day of index. NVMe tiers to the HDD when full.
 
-## Verification, nightly, reported by the API
+## Verification, every half hour for Sigsum and Rekor v2 and nightly for Rekor v1, reported by the API
 
 - Sigsum: leaves rehashed to the signed tree head; tree head signature and witness cosignatures checked against pinned keys.
 - Rekor v2: entries checked against hash tiles, tiles against the checkpoint, checkpoint signature against the trusted-root key.

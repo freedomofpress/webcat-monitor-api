@@ -1,4 +1,4 @@
-import json, pathlib, time, urllib.error, urllib.parse, urllib.request
+import fcntl, json, pathlib, time, urllib.error, urllib.parse, urllib.request
 
 class NotFound(Exception): pass
 
@@ -31,6 +31,8 @@ def ch(query, data=None, params=None):
 def record_status(name, status):
     """Merge one log's latest verification result into /srv/index/verification.json, served by /v1/status."""
     f = pathlib.Path("/srv/index/verification.json")
-    d = json.loads(f.read_text()) if f.exists() else {}
-    d[name] = {**status, "checked_at": int(time.time())}
-    f.write_text(json.dumps(d, indent=1))
+    with open(f.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        d = json.loads(f.read_text()) if f.exists() else {}
+        d[name] = {**status, "checked_at": int(time.time())}
+        f.write_text(json.dumps(d, indent=1))

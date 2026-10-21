@@ -122,7 +122,7 @@ PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=
 <style>body{font:15px/1.5 system-ui,sans-serif;max-width:64em;margin:2em auto;padding:0 1em;color:#222}table{border-collapse:collapse}
 td,th{text-align:left;padding:.25em 1.2em .25em 0;border-bottom:1px solid #ddd}pre{background:#f4f4f4;padding:.7em;overflow-x:auto}code{background:#f4f4f4;padding:.1em .3em}</style>
 <h1>WEBCAT log auditor</h1>
-<p><b>%(total)s</b> leaves indexed from %(n)d transparency logs, verified nightly against their signed tree heads.
+<p><b>%(total)s</b> leaves indexed from %(n)d transparency logs, verified against their signed tree heads every half hour (Sigsum, Rekor v2) or nightly (Rekor v1).
 Source code and documentation: <a href="%(src)s">%(src)s</a>.</p>
 <table><tr><th>Log<th>Leaves<th>Newest leaf<th>Last update<th>Verification</tr>%(rows)s</table>
 <h2>API</h2>

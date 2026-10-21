@@ -1,0 +1,9 @@
+[Unit]
+Description=Sigsum and Rekor v2 every half hour
+
+[Timer]
+OnCalendar=*:07,37 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

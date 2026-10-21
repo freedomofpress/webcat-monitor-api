@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Daily entry point: bring every source up to date, verify it, refresh its totals.
-usage: monitor.py [-c sources.toml] [NAME ...]   (no NAME = every source)"""
+"""Entry point: bring every source up to date, verify it, refresh its totals. Sigsum and Rekor v2 run every half hour,
+Rekor v1 nightly (systemd timers).
+usage: monitor.py [-c sources.toml] [-t TYPE ...] [NAME ...]   (no NAME, no TYPE = every source)"""
 import argparse, hashlib, logging, pathlib, sys, tomllib
 import quality, rekor_v1, rekor_v2, sigsum, verify
 from util import ch
@@ -17,6 +18,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--config", default=pathlib.Path(__file__).with_name("sources.toml"))
     ap.add_argument("names", nargs="*")
+    ap.add_argument("-t", "--type", action="append", default=[], help="only sources of this type (repeatable)")
     ap.add_argument("--rewrite-archive", type=int, metavar="UNTIL_BUNDLE", help="rekor-v2 only: refetch bundles [0, N) and rewrite their archive chunks")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -25,7 +27,7 @@ def main():
     paths["witnesses"] = {hashlib.sha256(bytes.fromhex(k)).hexdigest(): k for k in cfg.get("witnesses", {}).values()}
     failed = 0
     for src in cfg["source"]:
-        if a.names and src["name"] not in a.names: continue
+        if a.names and src["name"] not in a.names or a.type and src["type"] not in a.type: continue
         src["_cfg"] = cfg
         try:
             if a.rewrite_archive is not None:

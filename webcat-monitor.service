@@ -1,5 +1,5 @@
 [Unit]
-Description=webcat-monitor: fetch, verify and index the logs WEBCAT trusts
+Description=webcat-monitor: Rekor v1 nightly: dataset increment, leaf list, sample, repair
 After=network-online.target clickhouse-server.service srv-index.mount srv-archive.mount
 
 [Service]
@@ -9,7 +9,7 @@ Group=clickhouse
 WorkingDirectory=/opt/webcat-monitor
 Environment=CLOUDSDK_CONFIG=/srv/index/gcloud HOME=/srv/index
 # one lock for every writer: this timer, manual runs, bootstrap
-ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py
+ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py --type rekor-v1
 Nice=10
 IOSchedulingClass=idle
 ProtectSystem=strict

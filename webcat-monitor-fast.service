@@ -1,0 +1,18 @@
+[Unit]
+Description=webcat-monitor: Sigsum and Rekor v2 every half hour
+After=network-online.target clickhouse-server.service srv-index.mount srv-archive.mount
+
+[Service]
+Type=oneshot
+User=clickhouse
+Group=clickhouse
+WorkingDirectory=/opt/webcat-monitor
+Environment=CLOUDSDK_CONFIG=/srv/index/gcloud HOME=/srv/index
+ExecStart=/usr/bin/flock -n /run/lock/webcat-monitor-fast.lock /usr/bin/python3 /opt/webcat-monitor/monitor.py --type sigsum --type rekor-v2
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/srv/index /srv/archive /run/lock

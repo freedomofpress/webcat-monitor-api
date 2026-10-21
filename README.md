@@ -39,7 +39,7 @@ Answers are JSON. Claim queries are key-range lookups and take milliseconds on 3
 Everything lands in two volumes: the archives on an HDD, written once and read-only, and a ClickHouse index on an
 NVMe that is a projection of them. The index can be rebuilt from the archives at any time.
 
-## What is verified, every day
+## What is verified, every cycle
 
 - Sigsum: leaves rehashed to the signed tree head; tree head signature and witness cosignatures.
 - Rekor v2: entries to hash tiles, tiles to the checkpoint, checkpoint signature.
@@ -60,14 +60,14 @@ sudo -u clickhouse ./bootstrap.sh            # the history from the endpoints: a
 ```
 
 or, from an existing deployment, `./snapshot.sh make <dest>` there and `./snapshot.sh restore <src>` here instead of
-bootstrapping. After that a systemd timer runs `monitor.py` nightly. `python3 test.py` runs the offline checks.
+bootstrapping. After that systemd timers run `monitor.py`: Sigsum and Rekor v2 every half hour, Rekor v1 nightly. `python3 test.py` runs the offline checks.
 
 ## Code
 
 | | |
 |---|---|
 | `sources.toml` | the configuration: volumes, GCP project, API bind, logs and their keys |
-| `monitor.py` | nightly entry point; `sigsum.py`, `rekor_v2.py`, `rekor_v1.py` fetch and load one log type each |
+| `monitor.py` | the timers' entry point; `sigsum.py`, `rekor_v2.py`, `rekor_v1.py` fetch and load one log type each |
 | `verify.py` | Merkle trees and proofs, signed notes and checkpoints, Sigsum and Rekor tree heads |
 | `quality.py` | live sampling of Rekor v1, and the in-place repair of the dataset's gaps |
 | `build.py`, `load_v1.sql`, `load_v2.sql`, `schema.sql` | the index |
