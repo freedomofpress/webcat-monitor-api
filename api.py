@@ -126,7 +126,7 @@ td,th{text-align:left;padding:.25em 1.2em .25em 0;border-bottom:1px solid #ddd}p
 Source code and documentation: <a href="%(src)s">%(src)s</a>.</p>
 <table><tr><th>Log<th>Leaves<th>Newest leaf<th>Last update<th>Verification</tr>%(rows)s</table>
 <h2>API</h2>
-<p>Read-only JSON, no authentication, cached 5 minutes. Claim semantics are the WEBCAT extension's: every claim must match,
+<p>Read-only JSON, no authentication; answers are cacheable until the next half-hourly cycle. Claim semantics are the WEBCAT extension's: every claim must match,
 a value starting with <code>^</code> is a prefix, the SAN claim <code>2.5.29.17</code> matches any subject alternative name.
 Please keep it to a few requests per second; a burst gets 503 with <code>Retry-After</code>.</p>
 <pre>GET  /v1/sigstore/history?claims[&lt;oid&gt;]=&lt;value&gt;&amp;claims[&lt;oid&gt;]=&lt;value&gt;...[&amp;limit=N][&amp;before=&lt;unix time&gt;][&amp;cursor=C]
@@ -161,6 +161,11 @@ def home():
     ex2 = "/v1/sigsum/history?signer=wzRAXpRuYr5CHZmCAdK1Jh2widMU8GOwCNhONOHkV8k"
     return PAGE % {"total": f"{sum(r[2] for r in rows):,}", "n": len(rows), "src": SOURCE_URL, "rows": tr, "ex1": html.escape(ex1), "ex2": ex2}
 
+def max_age():
+    """Seconds until the next half-hourly cycle has landed (timers at :07 and :37, a minute to run); answers are fresh until then."""
+    t = time.time() % 3600
+    return int(next(s for s in (8 * 60, 38 * 60, 68 * 60) if s > t) - t)
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "webcat-auditor/0.1"
     def log_message(self, fmt, *args): pass
@@ -183,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
         body = obj.encode() if isinstance(obj, str) else json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", "public, max-age=300")
+        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", f"public, max-age={max_age()}" if status == 200 else "no-store")
         if retry: self.send_header("Retry-After", str(retry))
         self.end_headers(); self.wfile.write(body)
 
